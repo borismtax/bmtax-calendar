@@ -232,10 +232,27 @@ try {
     .waitFor();
   await page.getByLabel("Monday", { exact: true }).check();
   await page.getByLabel("Minimum booking notice").selectOption("0");
-  await page.getByRole("button", { name: "Save availability" }).click();
-  await page
-    .getByText("Availability saved. Your booking page is up to date.")
-    .waitFor();
+  const saveAvailability = async () => {
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/me" &&
+          response.request().method() === "PATCH",
+      ),
+      page
+        .getByRole("button", { name: "Save availability", exact: true })
+        .click(),
+    ]);
+    assert.equal(response.status(), 200, "Availability save succeeds");
+    // Consecutive saves can leave more than one five-second toast visible.
+    await page
+      .getByText("Availability saved. Your booking page is up to date.", {
+        exact: true,
+      })
+      .last()
+      .waitFor();
+  };
+  await saveAvailability();
   completed++;
   console.log("PASS browser: save weekly availability");
   await page.getByLabel("Monday end", { exact: true }).fill("12:00");
@@ -247,12 +264,7 @@ try {
     .click();
   const closedDate = DateTime.now().plus({ days: 10 }).toISODate();
   await page.locator("[data-override-date]").fill(closedDate);
-  await page
-    .getByRole("button", { name: "Save availability", exact: true })
-    .click();
-  await page
-    .getByText("Availability saved. Your booking page is up to date.")
-    .waitFor();
+  await saveAvailability();
   await page.reload();
   await page.getByLabel("Monday start", { exact: true }).first().waitFor();
   assert.equal(
