@@ -25,9 +25,13 @@ const esc = (value) =>
   String(value).replace(
     /[&<>"']/g,
     (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
-        c
-      ],
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c],
   );
 const slugify = (value) =>
   value
@@ -78,7 +82,8 @@ export function createApp(options = {}) {
       process.env.APP_URL ||
       process.env.RENDER_EXTERNAL_URL ||
       "http://localhost:3000",
-    dbPath: process.env.DATABASE_PATH || resolve(root, "data/calendar.sqlite"),
+    dbPath:
+      process.env.DATABASE_PATH || resolve(root, "data/calendar.sqlite"),
     production: process.env.NODE_ENV === "production",
     ownerEmail: (process.env.OWNER_EMAIL || "").toLowerCase(),
     resendKey: process.env.RESEND_API_KEY,
@@ -95,7 +100,10 @@ export function createApp(options = {}) {
   };
   // Render generates a high-entropy secret once and retains it across deployments.
   // Preserve support for existing explicit 64-hex encryption keys.
-  if (!process.env.TOKEN_ENCRYPTION_KEY && process.env.TOKEN_ENCRYPTION_SECRET)
+  if (
+    !process.env.TOKEN_ENCRYPTION_KEY &&
+    process.env.TOKEN_ENCRYPTION_SECRET
+  )
     need(
       process.env.TOKEN_ENCRYPTION_SECRET.length >= 32,
       500,
@@ -108,7 +116,8 @@ export function createApp(options = {}) {
     "APP_URL must be an origin without a path, query, or fragment.",
   );
   // Demo uses its own local database and never contacts Resend.
-  if (config.demo && !config.deliverMail) config.deliverMail = async () => {};
+  if (config.demo && !config.deliverMail)
+    config.deliverMail = async () => {};
   if (config.production) {
     need(!config.demo, 500, "DEMO_MODE must be disabled in production.");
     need(
@@ -175,6 +184,38 @@ export function createApp(options = {}) {
     db.exec(
       "ALTER TABLE event_types ADD COLUMN meeting_url TEXT NOT NULL DEFAULT ''",
     );
+  const migrate = (table, columns) => {
+    const existing = new Set(
+      db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(columns))
+      if (!existing.has(name))
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+  };
+  migrate("users", {
+    active: "INTEGER NOT NULL DEFAULT 1",
+    overrides: "TEXT NOT NULL DEFAULT '[]'",
+    google_account: "TEXT",
+    google_calendar: "TEXT",
+  });
+  migrate("event_types", { instructions: "TEXT NOT NULL DEFAULT ''" });
+  migrate("bookings", {
+    google_account: "TEXT",
+    google_calendar: "TEXT",
+    operation_started: "TEXT",
+    instructions: "TEXT NOT NULL DEFAULT ''",
+    phone: "TEXT NOT NULL DEFAULT ''",
+    meet_state: "TEXT NOT NULL DEFAULT 'none'",
+    meet_retry_at: "INTEGER NOT NULL DEFAULT 0",
+    meet_attempts: "INTEGER NOT NULL DEFAULT 0",
+  });
+  // Previously scheduled Meet events without a link also enter the durable recovery queue.
+  db.exec(
+    "UPDATE bookings SET meet_state='pending' WHERE status='scheduled' AND location='Google Meet' AND meet_url IS NULL AND google_id IS NOT NULL AND meet_state='none'",
+  );
   const get = (sql, ...params) => db.prepare(sql).get(...params);
   const all = (sql, ...params) => db.prepare(sql).all(...params);
   const run = (sql, ...params) => db.prepare(sql).run(...params);
@@ -226,9 +267,9 @@ export function createApp(options = {}) {
       limits.set(key, entry);
     }
     if (++entry.count > (sensitive ? (config.testMode ? 500 : 40) : 1500))
-      return res
-        .status(429)
-        .json({ error: "Too many requests. Please try again in 15 minutes." });
+      return res.status(429).json({
+        error: "Too many requests. Please try again in 15 minutes.",
+      });
     next();
   });
   const safeUser = (u) => ({
@@ -239,6 +280,8 @@ export function createApp(options = {}) {
     role: u.role,
     timezone: u.timezone,
     windows: JSON.parse(u.windows),
+    overrides: JSON.parse(u.overrides),
+    active: !!u.active,
     notice: u.notice,
     horizon: u.horizon,
     buffer: u.buffer,
@@ -248,7 +291,11 @@ export function createApp(options = {}) {
     onboardingComplete: !!u.onboarded,
   });
   const encrypt = (text) => {
-    need(config.encryptionKey, 503, "Calendar encryption is not configured.");
+    need(
+      config.encryptionKey,
+      503,
+      "Calendar encryption is not configured.",
+    );
     const iv = randomBytes(12);
     const cipher = createCipheriv(
       "aes-256-gcm",
@@ -302,9 +349,11 @@ export function createApp(options = {}) {
         "";
       if (url.startsWith("https://www.googleapis.com/calendar/")) {
         if (
-          ["SERVICE_DISABLED", "accessNotConfigured", "API_DISABLED"].includes(
-            reason,
-          ) ||
+          [
+            "SERVICE_DISABLED",
+            "accessNotConfigured",
+            "API_DISABLED",
+          ].includes(reason) ||
           /has not been used|is disabled/i.test(data.error?.message || "")
         ) {
           error.message =
@@ -342,7 +391,7 @@ export function createApp(options = {}) {
     );
   let flushing = false;
   async function flushMail() {
-    if (flushing) return;
+    if (flushing || closed) return;
     flushing = true;
     try {
       for (const item of all(
@@ -372,8 +421,10 @@ export function createApp(options = {}) {
               }),
             });
           }
+          if (closed) return;
           run("UPDATE outbox SET sent=1,error=NULL WHERE id=?", item.id);
         } catch {
+          if (closed) return;
           run(
             "UPDATE outbox SET attempts=attempts+1,next_try=?,error=? WHERE id=?",
             Date.now() +
@@ -397,7 +448,13 @@ export function createApp(options = {}) {
     `<div style="font-family:Arial,sans-serif;max-width:560px;margin:32px auto;color:#172033"><p style="color:#635bdb;font-weight:bold">BMT Calendar</p><h1>${esc(title)}</h1>${body}<p style="color:#6b7280;margin-top:32px">Scheduling, made simple.</p></div>`;
   const mailLink = (label, url) =>
     `<p><a href="${esc(url)}" style="display:inline-block;background:#635bdb;color:white;padding:12px 20px;border-radius:8px;text-decoration:none">${esc(label)}</a></p>`;
-  function createToken(userId, kind, email = null, data = null, minutes = 60) {
+  function createToken(
+    userId,
+    kind,
+    email = null,
+    data = null,
+    minutes = 60,
+  ) {
     const value = token();
     run(
       "INSERT INTO tokens VALUES(?,?,?,?,?,?)",
@@ -411,7 +468,11 @@ export function createApp(options = {}) {
     return value;
   }
   function readToken(value, kind) {
-    need(typeof value === "string", 400, "This link is invalid or expired.");
+    need(
+      typeof value === "string",
+      400,
+      "This link is invalid or expired.",
+    );
     const found = get(
       "SELECT * FROM tokens WHERE hash=? AND kind=? AND expires>?",
       hash(value),
@@ -429,15 +490,28 @@ export function createApp(options = {}) {
         hash(req.cookies.bmt_session),
         Date.now(),
       );
-    if (!s || !s.verified)
+    if (!s || !s.verified || !s.active)
       return res.status(401).json({ error: "Please sign in to continue." });
     req.user = s;
+    if (
+      !s.onboarded &&
+      !/^\/api\/(?:me(?:\/photo|\/onboarding)?|google\/(?:connect|callback|status|disconnect))$/.test(
+        req.path,
+      )
+    )
+      return res.status(403).json({
+        error:
+          "Upload a profile picture and connect Google Calendar to finish setup.",
+        code: "SETUP_REQUIRED",
+      });
     next();
   }
   const admin = (req, res, next) =>
     req.user.role === "admin"
       ? next()
-      : res.status(403).json({ error: "Administrator access is required." });
+      : res
+          .status(403)
+          .json({ error: "Administrator access is required." });
   function session(res, user) {
     const value = token();
     run(
@@ -454,7 +528,13 @@ export function createApp(options = {}) {
       path: "/",
     });
   }
-  function addUser({ name, email, password, role = "member", verified = 0 }) {
+  function addUser({
+    name,
+    email,
+    password,
+    role = "member",
+    verified = 0,
+  }) {
     const id = randomUUID();
     let slug = slugify(name) || "team";
     if (get("SELECT id FROM users WHERE slug=?", slug))
@@ -549,7 +629,7 @@ export function createApp(options = {}) {
   app.post("/api/auth/verify", (req, res) => {
     const t = readToken(req.body.token, "verify");
     const user = get("SELECT * FROM users WHERE id=?", t.user_id);
-    need(user, 400, "This link is invalid or expired.");
+    need(user && user.active, 400, "This link is invalid or expired.");
     // Keep the token until its original expiry so reopened links can show success.
     // A repeated verification must never issue another authenticated session.
     if (user.verified) return res.json({ alreadyVerified: true });
@@ -578,13 +658,21 @@ export function createApp(options = {}) {
       401,
       "Email or password is incorrect.",
     );
+    need(
+      user.active,
+      403,
+      "This account has been deactivated. Contact your administrator.",
+    );
     need(user.verified, 403, "Please verify your email before signing in.");
     session(res, user);
     res.json({ user: safeUser(user) });
   });
   app.post("/api/auth/logout", (req, res) => {
     if (req.cookies.bmt_session)
-      run("DELETE FROM sessions WHERE hash=?", hash(req.cookies.bmt_session));
+      run(
+        "DELETE FROM sessions WHERE hash=?",
+        hash(req.cookies.bmt_session),
+      );
     res.clearCookie("bmt_session", { path: "/" });
     res.json({ ok: true });
   });
@@ -604,7 +692,9 @@ export function createApp(options = {}) {
       );
       await flushMail();
     }
-    res.json({ message: "If an account exists, a reset link is on its way." });
+    res.json({
+      message: "If an account exists, a reset link is on its way.",
+    });
   });
   app.post("/api/auth/reset", (req, res) => {
     const password = passwordSchema.parse(req.body.password);
@@ -624,7 +714,10 @@ export function createApp(options = {}) {
   app.post("/api/auth/resend-verification", async (req, res) => {
     mailReady();
     const email = emailSchema.parse(req.body.email);
-    const user = get("SELECT * FROM users WHERE email=? AND verified=0", email);
+    const user = get(
+      "SELECT * FROM users WHERE email=? AND verified=0",
+      email,
+    );
     if (user) {
       const value = createToken(user.id, "verify");
       enqueue(
@@ -632,7 +725,10 @@ export function createApp(options = {}) {
         "Verify your BMT Calendar account",
         mailPage(
           "Verify your email",
-          mailLink("Verify email", `${config.baseUrl}/verify?token=${value}`),
+          mailLink(
+            "Verify email",
+            `${config.baseUrl}/verify?token=${value}`,
+          ),
         ),
       );
       await flushMail();
@@ -656,6 +752,24 @@ export function createApp(options = {}) {
       ).n,
     }),
   );
+  const rangeSchema = z
+    .object({ start: timeSchema, end: timeSchema })
+    .refine((w) => w.start < w.end, "End time must follow start time.");
+  const dateSchema = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .refine((d) => DateTime.fromISO(d).isValid, "Choose a valid date.");
+  function validateRanges(ranges) {
+    const sorted = [...ranges].sort((a, b) =>
+      a.start.localeCompare(b.start),
+    );
+    for (let i = 1; i < sorted.length; i++)
+      need(
+        sorted[i - 1].end <= sorted[i].start,
+        400,
+        "Availability windows must not overlap.",
+      );
+  }
   app.patch("/api/me", auth, (req, res) => {
     const body = z
       .object({
@@ -664,6 +778,15 @@ export function createApp(options = {}) {
         notice: z.number().int().min(0).max(10080),
         horizon: z.number().int().min(1).max(180),
         buffer: z.number().int().min(0).max(120),
+        overrides: z
+          .array(
+            z.object({
+              date: dateSchema,
+              windows: z.array(rangeSchema).max(6),
+            }),
+          )
+          .max(366)
+          .optional(),
         windows: z
           .array(
             z
@@ -677,7 +800,7 @@ export function createApp(options = {}) {
                 "End time must follow start time.",
               ),
           )
-          .max(21),
+          .max(42),
       })
       .parse(req.body);
     for (let i = 0; i < body.windows.length; i++)
@@ -690,14 +813,24 @@ export function createApp(options = {}) {
           "Availability windows must not overlap.",
         );
       }
+    if (body.overrides) {
+      need(
+        new Set(body.overrides.map((o) => o.date)).size ===
+          body.overrides.length,
+        400,
+        "Use one override per date.",
+      );
+      body.overrides.forEach((o) => validateRanges(o.windows));
+    }
     run(
-      "UPDATE users SET name=?,timezone=?,notice=?,horizon=?,buffer=?,windows=? WHERE id=?",
+      "UPDATE users SET name=?,timezone=?,notice=?,horizon=?,buffer=?,windows=?,overrides=? WHERE id=?",
       body.name,
       body.timezone,
       body.notice,
       body.horizon,
       body.buffer,
       JSON.stringify(body.windows),
+      body.overrides ? JSON.stringify(body.overrides) : req.user.overrides,
       req.user.id,
     );
     res.json({
@@ -710,7 +843,10 @@ export function createApp(options = {}) {
       .max(2_800_000)
       .regex(/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/)
       .parse(req.body.image);
-    const bytes = Buffer.from(image.slice(image.indexOf(",") + 1), "base64");
+    const bytes = Buffer.from(
+      image.slice(image.indexOf(",") + 1),
+      "base64",
+    );
     need(
       bytes.length <= 2 * 1024 * 1024,
       400,
@@ -751,12 +887,25 @@ export function createApp(options = {}) {
   });
   app.post("/api/me/onboarding", auth, async (req, res) => {
     need(
+      req.user.photo,
+      409,
+      "Upload a profile picture before finishing setup.",
+    );
+    need(
       req.user.google_refresh,
       409,
       "Connect Google Calendar before finishing setup.",
     );
     const now = DateTime.now().toUTC();
     await busy(req.user, now.toISO(), now.plus({ days: 1 }).toISO());
+    const fresh = get("SELECT * FROM users WHERE id=?", req.user.id);
+    need(
+      fresh.active &&
+        fresh.photo &&
+        fresh.google_refresh === req.user.google_refresh,
+      409,
+      "Your profile or connection changed. Please finish setup again.",
+    );
     run("UPDATE users SET onboarded=1 WHERE id=?", req.user.id);
     res.json({
       user: safeUser(get("SELECT * FROM users WHERE id=?", req.user.id)),
@@ -777,10 +926,27 @@ export function createApp(options = {}) {
       description: z.string().max(2000).default(""),
       location: z.enum(["Google Meet", "Zoom", "Phone call", "In person"]),
       meetingUrl: z.string().trim().max(2048).default(""),
-      color: z.enum(["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#3b82f6"]),
+      instructions: z.string().trim().max(1000).default(""),
+      color: z.enum([
+        "#6366f1",
+        "#10b981",
+        "#f59e0b",
+        "#ec4899",
+        "#3b82f6",
+      ]),
       active: z.boolean().default(true),
     })
     .superRefine((event, ctx) => {
+      if (
+        ["Phone call", "In person"].includes(event.location) &&
+        !event.instructions
+      )
+        ctx.addIssue({
+          code: "custom",
+          path: ["instructions"],
+          message:
+            "Add calling instructions or the meeting address before saving.",
+        });
       if (event.location !== "Zoom") return;
       let valid = false;
       try {
@@ -792,7 +958,8 @@ export function createApp(options = {}) {
           (!url.port || url.port === "443") &&
           ["zoom.us", "zoom.com", "zoomgov.com"].some(
             (domain) =>
-              url.hostname === domain || url.hostname.endsWith("." + domain),
+              url.hostname === domain ||
+              url.hostname.endsWith("." + domain),
           ) &&
           /^\/(?:j\/\d+|s\/\d+|my\/[^/]+)(?:\/|$)/.test(url.pathname);
       } catch {}
@@ -808,9 +975,11 @@ export function createApp(options = {}) {
     const b = eventSchema.parse(req.body);
     const id = randomUUID();
     const slug =
-      (slugify(b.title) || "meeting") + "-" + randomBytes(2).toString("hex");
+      (slugify(b.title) || "meeting") +
+      "-" +
+      randomBytes(2).toString("hex");
     run(
-      "INSERT INTO event_types(id,user_id,title,slug,duration,description,location,color,active,meeting_url) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO event_types(id,user_id,title,slug,duration,description,location,color,active,meeting_url,instructions) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
       id,
       req.user.id,
       b.title,
@@ -821,6 +990,7 @@ export function createApp(options = {}) {
       b.color,
       Number(b.active),
       b.location === "Zoom" ? b.meetingUrl : "",
+      b.instructions,
     );
     res
       .status(201)
@@ -838,7 +1008,7 @@ export function createApp(options = {}) {
       "Event type not found.",
     );
     run(
-      "UPDATE event_types SET title=?,duration=?,description=?,location=?,color=?,active=?,meeting_url=? WHERE id=?",
+      "UPDATE event_types SET title=?,duration=?,description=?,location=?,color=?,active=?,meeting_url=?,instructions=? WHERE id=?",
       b.title,
       b.duration,
       b.description,
@@ -846,24 +1016,26 @@ export function createApp(options = {}) {
       b.color,
       Number(b.active),
       b.location === "Zoom" ? b.meetingUrl : "",
+      b.instructions,
       req.params.id,
     );
     res.json({ ok: true });
   });
   app.get("/api/team", auth, (req, res) =>
     res.json({
-      users: all("SELECT * FROM users WHERE verified=1 ORDER BY created").map(
-        (u) => ({
-          id: u.id,
-          name: u.name,
-          photo: u.photo,
-          slug: u.slug,
-          role: u.role,
-          ...(req.user.role === "admin"
-            ? { email: u.email, googleConnected: !!u.google_refresh }
-            : {}),
-        }),
-      ),
+      users: all(
+        `SELECT * FROM users WHERE verified=1 ${req.user.role === "admin" ? "" : "AND active=1"} ORDER BY created`,
+      ).map((u) => ({
+        id: u.id,
+        name: u.name,
+        photo: u.photo,
+        slug: u.slug,
+        role: u.role,
+        active: !!u.active,
+        ...(req.user.role === "admin"
+          ? { email: u.email, googleConnected: !!u.google_refresh }
+          : {}),
+      })),
     }),
   );
   app.post("/api/team/invite", auth, admin, async (req, res) => {
@@ -886,13 +1058,168 @@ export function createApp(options = {}) {
     await flushMail();
     res.json({ message: "Invitation sent." });
   });
-  app.get("/api/bookings", auth, (req, res) => {
-    const isTeam = req.query.team === "true" && req.user.role === "admin";
-    const bookings = all(
-      `SELECT b.*,u.name AS host_name FROM bookings b JOIN users u ON u.id=b.user_id ${isTeam ? "" : "WHERE b.user_id=?"} ORDER BY b.start DESC LIMIT 1000`,
-      ...(isTeam ? [] : [req.user.id]),
+  app.patch("/api/team/:id", auth, admin, (req, res) => {
+    const { active } = z.object({ active: z.boolean() }).parse(req.body);
+    const member = get("SELECT * FROM users WHERE id=?", req.params.id);
+    need(member, 404, "Team member not found.");
+    need(
+      member.id !== req.user.id,
+      409,
+      "You cannot deactivate your own account.",
     );
-    res.json({ bookings: bookings.map(({ manage_hash, ...b }) => b) });
+    need(
+      member.role !== "admin" ||
+        active ||
+        get("SELECT count(*) n FROM users WHERE role='admin' AND active=1")
+          .n > 1,
+      409,
+      "Keep at least one active administrator.",
+    );
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      run(
+        "UPDATE users SET active=? WHERE id=?",
+        Number(active),
+        member.id,
+      );
+      if (!active) {
+        run("DELETE FROM sessions WHERE user_id=?", member.id);
+        run("DELETE FROM tokens WHERE user_id=?", member.id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    res.json({ ok: true });
+  });
+  app.post("/api/team/:id/revoke-sessions", auth, admin, (req, res) => {
+    need(
+      get("SELECT id FROM users WHERE id=?", req.params.id),
+      404,
+      "Team member not found.",
+    );
+    run("DELETE FROM sessions WHERE user_id=?", req.params.id);
+    run("DELETE FROM tokens WHERE user_id=?", req.params.id);
+    res.json({ ok: true });
+  });
+  function bookingQuery(req) {
+    const q = z
+      .object({
+        team: z.enum(["true", "false"]).default("false"),
+        filter: z
+          .enum(["all", "upcoming", "past", "cancelled", "pending"])
+          .default("all"),
+        search: z.string().max(200).default(""),
+        from: z.iso.datetime({ offset: true }).optional(),
+        to: z.iso.datetime({ offset: true }).optional(),
+      })
+      .parse(req.query);
+    need(
+      q.team !== "true" || req.user.role === "admin",
+      403,
+      "Administrator access is required.",
+    );
+    const clauses = ["1=1"],
+      params = [];
+    if (q.team !== "true") {
+      clauses.push("b.user_id=?");
+      params.push(req.user.id);
+    }
+    if (q.filter === "upcoming" || q.filter === "past") {
+      clauses.push(
+        `b.status='scheduled' AND b.end${q.filter === "upcoming" ? ">" : "<="}?`,
+      );
+      params.push(new Date().toISOString());
+    } else if (q.filter !== "all") {
+      clauses.push("b.status=?");
+      params.push(q.filter);
+    }
+    if (q.search) {
+      clauses.push(
+        "instr(lower(b.name || ' ' || b.email || ' ' || b.title), lower(?)) > 0",
+      );
+      params.push(q.search);
+    }
+    if (q.from) {
+      clauses.push("b.start>=?");
+      params.push(DateTime.fromISO(q.from).toUTC().toISO());
+    }
+    if (q.to) {
+      clauses.push("b.start<?");
+      params.push(DateTime.fromISO(q.to).toUTC().toISO());
+    }
+    return { where: clauses.join(" AND "), params };
+  }
+  app.get("/api/bookings", auth, (req, res) => {
+    const { where, params } = bookingQuery(req);
+    const limit = z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .default(250)
+      .parse(req.query.limit);
+    const offset = z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .parse(req.query.offset);
+    const total = get(
+      `SELECT count(*) n FROM bookings b WHERE ${where}`,
+      ...params,
+    ).n;
+    const bookings = all(
+      `SELECT b.*,u.name AS host_name FROM bookings b JOIN users u ON u.id=b.user_id WHERE ${where} ORDER BY b.start DESC,b.id LIMIT ? OFFSET ?`,
+      ...params,
+      limit,
+      offset,
+    );
+    res.json({
+      bookings: bookings.map(cleanBooking),
+      total,
+      nextOffset:
+        offset + bookings.length < total ? offset + bookings.length : null,
+    });
+  });
+  app.get("/api/bookings/export", auth, (req, res) => {
+    const { where, params } = bookingQuery(req);
+    const fields = [
+      "title",
+      "name",
+      "email",
+      "phone",
+      "start",
+      "end",
+      "timezone",
+      "status",
+      "location",
+      "instructions",
+      "host_name",
+    ];
+    const cell = (value) =>
+      '"' +
+      String(value ?? "")
+        .replace(/^[\s]*[=+@\-]/, "'$&")
+        .replaceAll('"', '""') +
+      '"';
+    const rows = db
+      .prepare(
+        `SELECT b.*,u.name AS host_name FROM bookings b JOIN users u ON u.id=b.user_id WHERE ${where} ORDER BY b.start DESC,b.id`,
+      )
+      .iterate(...params);
+    res.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="bmt-appointments.csv"',
+    });
+    // SQLite iteration gives this export one consistent read; no page-size truncation.
+    res.send(
+      [
+        fields.join(","),
+        ...Array.from(rows, (b) => fields.map((f) => cell(b[f])).join(",")),
+      ].join("\r\n"),
+    );
   });
   async function accessToken(user) {
     need(
@@ -930,31 +1257,203 @@ export function createApp(options = {}) {
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
   }
-  async function busy(user, start, end) {
+  const accountId = (u) =>
+    u.google_account ||
+    u.google_email?.toLowerCase() ||
+    (config.calendarProvider ? "test-provider" : null);
+  const calendarId = (u) =>
+    u.google_calendar || u.google_email?.toLowerCase() || "primary";
+  const calendarPath = (u, b) =>
+    `calendars/${encodeURIComponent(b?.google_calendar || calendarId(u))}/events`;
+  const appointmentLocks = new Set();
+  const connectionChanges = new Set();
+  async function withBookingLock(b, fn) {
+    const key = b.parent_id || b.id;
+    need(
+      !appointmentLocks.has(key),
+      409,
+      "Another change to this appointment is in progress. Please try again shortly.",
+    );
+    appointmentLocks.add(key);
+    try {
+      return await fn();
+    } finally {
+      appointmentLocks.delete(key);
+    }
+  }
+  const hasOpenBookings = (id) =>
+    get(
+      "SELECT id FROM bookings WHERE user_id=? AND (status='pending' OR (status='scheduled' AND end>?))",
+      id,
+      new Date().toISOString(),
+    );
+  async function lookupEvent(u, b) {
+    return config.calendarProvider
+      ? config.calendarProvider.lookup(u, b)
+      : google(
+          u,
+          `${calendarPath(u, b)}/${encodeURIComponent(b.google_id)}`,
+        );
+  }
+  async function boundUser(b) {
+    const u = get("SELECT * FROM users WHERE id=?", b.user_id);
+    if (!b.google_id) return u;
+    if (config.demo && u.email === "demo@bmtcalendar.local") return u;
+    need(
+      accountId(u),
+      409,
+      "Reconnect the original Google account before changing this appointment.",
+    );
+    const bindingMatches = (record) =>
+      record &&
+      (!record.google_account || record.google_account === accountId(u)) &&
+      (!record.google_calendar || record.google_calendar === calendarId(u));
+    need(
+      bindingMatches(b),
+      409,
+      "Reconnect this appointment's original Google account and calendar before changing it.",
+    );
+    if (!b.google_account || !b.google_calendar) {
+      // Never assume a legacy booking belongs to whichever account is connected now.
+      let remote;
+      try {
+        remote = await lookupEvent(u, b);
+      } catch {}
+      const expected = b.parent_id
+        ? get("SELECT * FROM bookings WHERE id=?", b.parent_id)
+        : b;
+      need(
+        bindingMatches(expected),
+        409,
+        "The original appointment belongs to a different Google account or calendar.",
+      );
+      const matches = (candidate) =>
+        candidate &&
+        remote &&
+        remote.status !== "cancelled" &&
+        remote.id === b.google_id &&
+        remote.organizer?.self === true &&
+        remote.organizer.email?.toLowerCase() ===
+          calendarId(u).toLowerCase() &&
+        DateTime.fromISO(remote.start?.dateTime || "").toMillis() ===
+          DateTime.fromISO(candidate.start).toMillis() &&
+        DateTime.fromISO(remote.end?.dateTime || "").toMillis() ===
+          DateTime.fromISO(candidate.end).toMillis();
+      need(
+        matches(b) || matches(expected),
+        409,
+        "This older appointment's original calendar is unverified. Reconnect its original Google account and check the event before changing it.",
+      );
+      // OAuth may have completed while the legacy event lookup was in flight.
+      // Do not establish a binding from stale credentials and strand the booking.
+      const current = get("SELECT * FROM users WHERE id=?", u.id);
+      need(
+        accountId(current) === accountId(u) &&
+          calendarId(current) === calendarId(u) &&
+          current.google_refresh === u.google_refresh,
+        409,
+        "The calendar connection changed during verification. Please try again.",
+      );
+      run(
+        "UPDATE bookings SET google_account=?,google_calendar=? WHERE id=? OR id=?",
+        accountId(u),
+        calendarId(u),
+        b.id,
+        expected.id,
+      );
+      b.google_account = accountId(u);
+      b.google_calendar = calendarId(u);
+    }
+    need(
+      b.google_account === accountId(u) &&
+        b.google_calendar === calendarId(u),
+      409,
+      "Reconnect this appointment's original Google account and calendar before changing it.",
+    );
+    return u;
+  }
+  async function busy(user, start, end, exclude = null) {
     const local = all(
-      "SELECT start,end FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND start<? AND end>?",
+      "SELECT start,end FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND id<>? AND start<? AND end>?",
       user.id,
+      exclude?.id || "",
       end,
       start,
     );
     if (config.calendarProvider)
       return [
         ...local,
-        ...(await config.calendarProvider.busy(user, start, end)),
+        ...(await config.calendarProvider.busy(user, start, end, exclude)),
       ];
-    if (config.demo && user.email === "demo@bmtcalendar.local") return local;
+    if (config.demo && user.email === "demo@bmtcalendar.local")
+      return local;
+    if (exclude?.google_id) {
+      // Free/busy merges overlapping events. Subtracting the old interval could hide
+      // another event, so enumerate every page and exclude only the exact event ID.
+      let pageToken,
+        occupied = [];
+      do {
+        const query = new URLSearchParams({
+          timeMin: start,
+          timeMax: end,
+          singleEvents: "true",
+          maxResults: "2500",
+          ...(pageToken ? { pageToken } : {}),
+        });
+        const data = await google(
+          user,
+          `${calendarPath(user, exclude)}?${query}`,
+        );
+        need(
+          Array.isArray(data.items),
+          503,
+          "Calendar availability could not be checked.",
+        );
+        for (const event of data.items) {
+          if (
+            event.id === exclude.google_id ||
+            event.status === "cancelled" ||
+            event.transparency === "transparent" ||
+            event.attendees?.some(
+              (a) => a.self && a.responseStatus === "declined",
+            )
+          )
+            continue;
+          const zone = data.timeZone || user.timezone;
+          const from =
+            event.start?.dateTime ||
+            DateTime.fromISO(event.start?.date || "", { zone })
+              .toUTC()
+              .toISO();
+          const to =
+            event.end?.dateTime ||
+            DateTime.fromISO(event.end?.date || "", { zone })
+              .toUTC()
+              .toISO();
+          need(
+            from && to,
+            503,
+            "Calendar availability could not be checked.",
+          );
+          occupied.push({ start: from, end: to });
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+      return [...local, ...occupied];
+    }
+    const id = calendarId(user);
     const data = await google(user, "freeBusy", "POST", {
       timeMin: start,
       timeMax: end,
-      items: [{ id: "primary" }],
+      items: [{ id }],
     });
     need(
-      !data.calendars?.primary?.errors?.length &&
-        Array.isArray(data.calendars?.primary?.busy),
+      !data.calendars?.[id]?.errors?.length &&
+        Array.isArray(data.calendars?.[id]?.busy),
       503,
       "Calendar availability could not be checked. Please try again later.",
     );
-    return [...local, ...data.calendars.primary.busy];
+    return [...local, ...data.calendars[id].busy];
   }
   app.get("/api/google/status", auth, async (req, res) => {
     if (!req.user.google_refresh)
@@ -982,7 +1481,10 @@ export function createApp(options = {}) {
     }
   });
   function publicEvent(host, slug) {
-    const u = get("SELECT * FROM users WHERE slug=? AND verified=1", host);
+    const u = get(
+      "SELECT * FROM users WHERE slug=? AND verified=1 AND active=1 AND onboarded=1",
+      host,
+    );
     need(u, 404, "This scheduling page was not found.");
     const e = get(
       "SELECT * FROM event_types WHERE user_id=? AND slug=? AND active=1",
@@ -992,7 +1494,7 @@ export function createApp(options = {}) {
     need(e, 404, "This event is not available for booking.");
     return { u, e };
   }
-  async function slots(u, e, date, zone) {
+  function candidateSlots(u, e, date, zone) {
     const day = DateTime.fromISO(date, { zone });
     need(
       day.isValid && /^\d{4}-\d{2}-\d{2}$/.test(date),
@@ -1005,18 +1507,21 @@ export function createApp(options = {}) {
       day.startOf("day") > now.plus({ days: u.horizon }).endOf("day")
     )
       return [];
-    const from = day.startOf("day").minus({ days: 1 }).toUTC().toISO(),
-      to = day.endOf("day").plus({ days: 1 }).toUTC().toISO();
-    const occupied = await busy(u, from, to);
+
     const windows = JSON.parse(u.windows),
       result = [];
     const hostStart = day.startOf("day").setZone(u.timezone).startOf("day");
     for (let d = 0; d < 3; d++) {
       const hostDay = hostStart.plus({ days: d });
-      for (const w of windows.filter((w) => w.day === hostDay.weekday)) {
+      const override = JSON.parse(u.overrides).find(
+        (o) => o.date === hostDay.toISODate(),
+      );
+      for (const w of override
+        ? override.windows
+        : windows.filter((w) => w.day === hostDay.weekday)) {
         const [h, m] = w.start.split(":").map(Number),
           [eh, em] = w.end.split(":").map(Number);
-        const first = hostDay.set({
+        let first = hostDay.set({
             hour: h,
             minute: m,
             second: 0,
@@ -1028,6 +1533,12 @@ export function createApp(options = {}) {
             second: 0,
             millisecond: 0,
           });
+        first = first
+          .getPossibleOffsets()
+          .sort((a, b) => a.toMillis() - b.toMillis())[0];
+        last = last
+          .getPossibleOffsets()
+          .sort((a, b) => b.toMillis() - a.toMillis())[0];
         for (
           let t = first;
           t.plus({ minutes: e.duration }) <= last;
@@ -1035,30 +1546,77 @@ export function createApp(options = {}) {
         ) {
           const end = t.plus({ minutes: e.duration });
           if (
+            t.toFormat("HH:mm") < w.start ||
+            t.toFormat("HH:mm") >= w.end ||
+            end.toFormat("HH:mm") > w.end ||
             t.setZone(zone).toISODate() !== date ||
             t < now.plus({ minutes: u.notice }) ||
             t > now.plus({ days: u.horizon })
           )
             continue;
-          const paddedStart = t.minus({ minutes: u.buffer }).toMillis(),
-            paddedEnd = end.plus({ minutes: u.buffer }).toMillis();
-          if (
-            occupied.some(
-              (b) =>
-                DateTime.fromISO(b.start).toMillis() < paddedEnd &&
-                DateTime.fromISO(b.end).toMillis() > paddedStart,
-            )
-          )
-            continue;
+          // On a repeated clock hour, endpoints alone can straddle a closed
+          // part of a short working window. Check the intervening wall minutes.
+          if (t.offset !== end.offset) {
+            let fits = true;
+            for (
+              let cursor = t;
+              cursor < end;
+              cursor = cursor.plus({ minutes: 1 })
+            ) {
+              const wall = cursor.toFormat("HH:mm");
+              if (wall < w.start || wall >= w.end) {
+                fits = false;
+                break;
+              }
+            }
+            if (!fits) continue;
+          }
           result.push(t.toUTC().toISO());
         }
       }
     }
     return [...new Set(result)].sort();
   }
+  async function slots(u, e, date, zone, exclude = null) {
+    const candidates = candidateSlots(u, e, date, zone);
+    if (!candidates.length) return [];
+    const day = DateTime.fromISO(date, { zone });
+    const occupied = await busy(
+      u,
+      day.startOf("day").minus({ days: 1 }).toUTC().toISO(),
+      day.endOf("day").plus({ days: 1 }).toUTC().toISO(),
+      exclude,
+    );
+    return candidates.filter((start) => {
+      const t = DateTime.fromISO(start),
+        from = t.minus({ minutes: u.buffer }).toMillis(),
+        to = t.plus({ minutes: e.duration + u.buffer }).toMillis();
+      return !occupied.some(
+        (b) =>
+          DateTime.fromISO(b.start).toMillis() < to &&
+          DateTime.fromISO(b.end).toMillis() > from,
+      );
+    });
+  }
+  app.get("/api/public/:host/:event/dates", (req, res) => {
+    const { u, e } = publicEvent(req.params.host, req.params.event),
+      zone = zoneSchema.parse(req.query.timezone || u.timezone);
+    const month = z
+      .string()
+      .regex(/^\d{4}-\d{2}$/)
+      .parse(req.query.month);
+    const first = DateTime.fromISO(month + "-01", { zone });
+    need(first.isValid, 400, "Choose a valid month.");
+    const dates = [];
+    for (let i = 0; i < first.daysInMonth; i++) {
+      const date = first.plus({ days: i }).toISODate();
+      if (candidateSlots(u, e, date, zone).length) dates.push(date);
+    }
+    res.json({ dates });
+  });
   app.get("/api/public/:host", (req, res) => {
     const u = get(
-      "SELECT * FROM users WHERE slug=? AND verified=1",
+      "SELECT * FROM users WHERE slug=? AND verified=1 AND active=1 AND onboarded=1",
       req.params.host,
     );
     need(u, 404, "This scheduling page was not found.");
@@ -1070,7 +1628,7 @@ export function createApp(options = {}) {
         photo: u.photo,
       },
       events: all(
-        "SELECT title,slug,duration,description,location,color FROM event_types WHERE user_id=? AND active=1",
+        "SELECT title,slug,duration,description,location,color,instructions FROM event_types WHERE user_id=? AND active=1",
         u.id,
       ),
     });
@@ -1090,6 +1648,7 @@ export function createApp(options = {}) {
         duration: e.duration,
         description: e.description,
         location: e.location,
+        instructions: e.instructions,
         color: e.color,
       },
       horizon: u.horizon,
@@ -1100,11 +1659,35 @@ export function createApp(options = {}) {
     const zone = zoneSchema.parse(req.query.timezone || u.timezone);
     res.json({ slots: await slots(u, e, String(req.query.date), zone) });
   });
+  app.get("/api/manage/:token/slots", async (req, res) => {
+    const b = managed(req.params.token);
+    need(
+      b.status === "scheduled",
+      409,
+      "This appointment cannot be rescheduled.",
+    );
+    const u = await boundUser(b),
+      e = get("SELECT * FROM event_types WHERE id=?", b.event_id);
+    need(
+      u.active && e.active,
+      409,
+      "This host is not accepting rescheduling. Contact the host.",
+    );
+    res.json({
+      slots: await slots(
+        u,
+        e,
+        String(req.query.date),
+        zoneSchema.parse(req.query.timezone || b.timezone),
+        b,
+      ),
+    });
+  });
   function bookingMail(b, u, manageToken, changed = false) {
     const when = DateTime.fromISO(b.start)
       .setZone(b.timezone)
       .toFormat("cccc, LLLL d, yyyy · h:mm a ZZZZ");
-    const body = `<p>${esc(b.title)} with ${esc(u.name)}</p><p><strong>${esc(when)}</strong></p><p>${esc(b.location)}</p>${b.meet_url ? mailLink(b.location === "Zoom" ? "Join Zoom" : "Join Google Meet", b.meet_url) : ""}${manageToken ? mailLink("Manage appointment", `${config.baseUrl}/manage/${manageToken}`) : ""}`;
+    const body = `<p>${esc(b.title)} with ${esc(u.name)}</p><p><strong>${esc(when)}</strong></p><p>${esc(b.location)}</p>${b.instructions ? `<p>${esc(b.instructions)}</p>` : ""}${b.phone ? `<p>Guest phone: ${esc(b.phone)}</p>` : ""}${b.meet_state === "pending" ? "<p>Your Google Meet link is being prepared. We will email it when ready.</p>" : ""}${b.meet_url ? mailLink(b.location === "Zoom" ? "Join Zoom" : "Join Google Meet", b.meet_url) : ""}${manageToken ? mailLink("Manage appointment", `${config.baseUrl}/manage/${manageToken}`) : ""}`;
     enqueue(
       b.email,
       `${changed ? "Updated" : "Confirmed"}: ${b.title}`,
@@ -1120,16 +1703,20 @@ export function createApp(options = {}) {
     );
   }
   async function createCalendarEvent(u, e, b) {
-    if (config.calendarProvider) return config.calendarProvider.create(u, e, b);
+    if (config.calendarProvider)
+      return config.calendarProvider.create(u, e, b);
     if (config.demo && u.email === "demo@bmtcalendar.local") return {};
     const event = {
       id: b.id.replaceAll("-", ""),
       summary: e.title,
-      description: `Guest: ${b.name} (${b.email})\n${b.notes}`,
+      description: `Guest: ${b.name} (${b.email})\n${b.phone ? "Phone: " + b.phone + "\n" : ""}${e.instructions || ""}\n${b.notes}`,
       start: { dateTime: b.start },
       end: { dateTime: b.end },
       attendees: [{ email: b.email }, { email: u.email }],
-      location: e.location === "Zoom" ? e.meeting_url : e.location,
+      location:
+        e.location === "Zoom"
+          ? e.meeting_url
+          : e.instructions || e.location,
     };
     if (e.location === "Google Meet")
       event.conferenceData = {
@@ -1141,13 +1728,13 @@ export function createApp(options = {}) {
     try {
       return await google(
         u,
-        `calendars/primary/events?conferenceDataVersion=1&sendUpdates=all`,
+        `${calendarPath(u, b)}?conferenceDataVersion=1&sendUpdates=all`,
         "POST",
         event,
       );
     } catch (error) {
       if (error.providerStatus === 409)
-        return google(u, `calendars/primary/events/${event.id}`);
+        return google(u, `${calendarPath(u, b)}/${event.id}`);
       throw error;
     }
   }
@@ -1155,17 +1742,25 @@ export function createApp(options = {}) {
     name: z.string().trim().min(2).max(80),
     email: emailSchema,
     notes: z.string().max(2000).default(""),
+    phone: z.string().trim().max(40).default(""),
     timezone: zoneSchema,
     start: z.iso.datetime({ offset: true }),
   });
   const cleanBooking = (b) => {
-    const { manage_hash, ...clean } = b;
+    const { manage_hash, google_account, google_calendar, ...clean } = b;
     return clean;
   };
   app.post("/api/public/:host/:event/bookings", async (req, res) => {
     mailReady();
     const { u, e } = publicEvent(req.params.host, req.params.event);
     const b = guestSchema.parse(req.body);
+    need(
+      e.location !== "Phone call" ||
+        (/^[+()\d .-]{7,40}$/.test(b.phone) &&
+          b.phone.replace(/\D/g, "").length >= 7),
+      400,
+      "Enter a phone number where the host can reach you.",
+    );
     const start = DateTime.fromISO(b.start).toUTC().toISO(),
       end = DateTime.fromISO(start)
         .plus({ minutes: e.duration })
@@ -1182,6 +1777,15 @@ export function createApp(options = {}) {
       409,
       "That time is no longer available. Please choose another time.",
     );
+    const currentHost = get("SELECT * FROM users WHERE id=?", u.id);
+    need(
+      !connectionChanges.has(u.id) &&
+        currentHost.active &&
+        currentHost.onboarded &&
+        currentHost.google_refresh === u.google_refresh,
+      409,
+      "The host's calendar connection changed. Please try again.",
+    );
     const id = randomUUID(),
       manage = token();
     db.exec("BEGIN IMMEDIATE");
@@ -1191,7 +1795,10 @@ export function createApp(options = {}) {
           "SELECT id FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND start<? AND end>?",
           u.id,
           DateTime.fromISO(end).plus({ minutes: u.buffer }).toUTC().toISO(),
-          DateTime.fromISO(start).minus({ minutes: u.buffer }).toUTC().toISO(),
+          DateTime.fromISO(start)
+            .minus({ minutes: u.buffer })
+            .toUTC()
+            .toISO(),
         ),
         409,
         "That time was just booked. Please choose another time.",
@@ -1213,54 +1820,73 @@ export function createApp(options = {}) {
         e.location,
         new Date().toISOString(),
       );
+      // Deterministic Google IDs allow reconciliation after a timeout or a process restart.
+      run(
+        "UPDATE bookings SET google_id=?,meet_url=?,google_account=?,google_calendar=?,instructions=?,phone=? WHERE id=?",
+        id.replaceAll("-", ""),
+        e.location === "Zoom" ? e.meeting_url : null,
+        accountId(u),
+        calendarId(u),
+        e.instructions,
+        b.phone,
+        id,
+      );
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
       throw error;
     }
-    // Deterministic Google IDs allow reconciliation after a timeout or a process restart.
-    run(
-      "UPDATE bookings SET google_id=?,meet_url=? WHERE id=?",
-      id.replaceAll("-", ""),
-      e.location === "Zoom" ? e.meeting_url : null,
-      id,
-    );
-    let remote;
-    try {
-      remote = await createCalendarEvent(u, e, { ...b, id, start, end });
-    } catch (error) {
-      if (error.providerStatus >= 400 && error.providerStatus < 500)
-        run("UPDATE bookings SET status='failed' WHERE id=?", id);
-      else {
-        enqueue(
-          u.email,
-          "Appointment needs a calendar check",
-          mailPage(
-            "Please check an appointment",
-            `<p>A calendar request for ${esc(b.name)} could not be confirmed. The time is reserved to prevent a duplicate booking.</p>${mailLink("Check calendar status", config.baseUrl + "/app/bookings")}`,
-          ),
+    return withBookingLock({ id }, async () => {
+      let remote;
+      try {
+        remote = await createCalendarEvent(u, e, { ...b, id, start, end });
+      } catch (error) {
+        if (error.providerStatus >= 400 && error.providerStatus < 500)
+          run("UPDATE bookings SET status='failed' WHERE id=?", id);
+        else {
+          enqueue(
+            u.email,
+            "Appointment needs a calendar check",
+            mailPage(
+              "Please check an appointment",
+              `<p>A calendar request for ${esc(b.name)} could not be confirmed. The time is reserved to prevent a duplicate booking.</p>${mailLink("Check calendar status", config.baseUrl + "/app/bookings")}`,
+            ),
+          );
+          void flushMail();
+        }
+        throw new HttpError(
+          503,
+          "The calendar did not confirm this appointment. Please contact the host before trying again.",
         );
-        await flushMail();
       }
-      throw new HttpError(
-        503,
-        "The calendar did not confirm this appointment. Please contact the host before trying again.",
-      );
-    }
-    const meet =
-      e.location === "Zoom" ? e.meeting_url : remote.hangoutLink || null;
-    run(
-      "UPDATE bookings SET status='scheduled',google_id=?,meet_url=? WHERE id=?",
-      remote.id || null,
-      meet,
-      id,
-    );
-    const saved = get("SELECT * FROM bookings WHERE id=?", id);
-    bookingMail(saved, u, manage);
-    await flushMail();
-    res.status(201).json({
-      booking: cleanBooking(saved),
-      manageUrl: `${config.baseUrl}/manage/${manage}`,
+      let saved;
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const meet =
+          e.location === "Zoom"
+            ? e.meeting_url
+            : remote.hangoutLink || null;
+        run(
+          "UPDATE bookings SET status='scheduled',google_id=?,meet_url=?,meet_state=? WHERE id=?",
+          remote.id || null,
+          meet,
+          e.location === "Google Meet" && !meet && remote.id
+            ? "pending"
+            : "none",
+          id,
+        );
+        saved = get("SELECT * FROM bookings WHERE id=?", id);
+        bookingMail(saved, u, manage);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      void flushMail();
+      res.status(201).json({
+        booking: cleanBooking(saved),
+        manageUrl: `${config.baseUrl}/manage/${manage}`,
+      });
     });
   });
   function managed(value) {
@@ -1269,7 +1895,10 @@ export function createApp(options = {}) {
       404,
       "Appointment not found.",
     );
-    const b = get("SELECT * FROM bookings WHERE manage_hash=?", hash(value));
+    const b = get(
+      "SELECT * FROM bookings WHERE manage_hash=?",
+      hash(value),
+    );
     need(b, 404, "Appointment not found.");
     return b;
   }
@@ -1280,49 +1909,94 @@ export function createApp(options = {}) {
     res.json({
       booking: cleanBooking(b),
       host: { name: u.name, slug: u.slug, photo: u.photo },
-      event: { slug: e.slug, active: !!e.active },
+      event: { slug: e.slug, active: !!e.active && !!u.active },
     });
   });
   async function cancel(b) {
-    need(
-      b.status === "scheduled",
-      409,
-      "This appointment is no longer scheduled.",
-    );
-    need(
-      DateTime.fromISO(b.start) > DateTime.now(),
-      409,
-      "Past appointments cannot be cancelled.",
-    );
-    const u = get("SELECT * FROM users WHERE id=?", b.user_id);
-    if (b.google_id) {
-      if (config.calendarProvider) await config.calendarProvider.cancel(u, b);
-      else {
-        try {
-          await google(
-            u,
-            `calendars/primary/events/${encodeURIComponent(b.google_id)}?sendUpdates=all`,
-            "DELETE",
-          );
-        } catch (error) {
-          if (error.providerStatus !== 404 && error.providerStatus !== 410)
-            throw error;
+    return withBookingLock(b, async () => {
+      b = get("SELECT * FROM bookings WHERE id=?", b.id);
+      need(
+        !get(
+          "SELECT id FROM bookings WHERE parent_id=? AND status='pending'",
+          b.id,
+        ),
+        409,
+        "Resolve the pending change before cancelling this appointment.",
+      );
+      need(
+        b.status === "scheduled",
+        409,
+        "This appointment is no longer scheduled.",
+      );
+      need(
+        DateTime.fromISO(b.start) > DateTime.now(),
+        409,
+        "Past appointments cannot be cancelled.",
+      );
+      const u = await boundUser(b);
+      run(
+        "UPDATE bookings SET status='pending',operation='cancel',operation_started=? WHERE id=?",
+        new Date().toISOString(),
+        b.id,
+      );
+      try {
+        if (b.google_id) {
+          if (config.calendarProvider)
+            await config.calendarProvider.cancel(u, b);
+          else {
+            try {
+              await google(
+                u,
+                `${calendarPath(u, b)}/${encodeURIComponent(b.google_id)}?sendUpdates=all`,
+                "DELETE",
+              );
+            } catch (error) {
+              if (
+                error.providerStatus !== 404 &&
+                error.providerStatus !== 410
+              )
+                throw error;
+            }
+          }
         }
+      } catch (error) {
+        if (error.providerStatus >= 400 && error.providerStatus < 500)
+          run(
+            "UPDATE bookings SET status='scheduled',operation='create' WHERE id=?",
+            b.id,
+          );
+        throw new HttpError(
+          503,
+          "The calendar did not confirm the cancellation. Check calendar status before trying again.",
+        );
       }
+      finishCancellation(b, u);
+    });
+  }
+  function finishCancellation(b, u) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      run(
+        "UPDATE bookings SET status='cancelled',operation='create' WHERE id=?",
+        b.id,
+      );
+      const body = `<p>${esc(b.title)} with ${esc(b.name)} on ${esc(DateTime.fromISO(b.start).setZone(u.timezone).toFormat("LLL d, yyyy, h:mm a ZZZZ"))} has been cancelled.</p>`;
+      enqueue(
+        b.email,
+        `Cancelled: ${b.title}`,
+        mailPage("Appointment cancelled", body),
+      );
+      enqueue(
+        u.email,
+        `Cancelled: ${b.title}`,
+        mailPage("Appointment cancelled", body),
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
-    run("UPDATE bookings SET status='cancelled' WHERE id=?", b.id);
-    const body = `<p>${esc(b.title)} with ${esc(b.name)} on ${esc(DateTime.fromISO(b.start).setZone(u.timezone).toFormat("LLL d, yyyy, h:mm a ZZZZ"))} has been cancelled.</p>`;
-    enqueue(
-      b.email,
-      `Cancelled: ${b.title}`,
-      mailPage("Appointment cancelled", body),
-    );
-    enqueue(
-      u.email,
-      `Cancelled: ${b.title}`,
-      mailPage("Appointment cancelled", body),
-    );
-    await flushMail();
+    void flushMail();
   }
   app.post("/api/manage/:token/cancel", async (req, res) => {
     await cancel(managed(req.params.token));
@@ -1340,131 +2014,175 @@ export function createApp(options = {}) {
   });
   app.post("/api/manage/:token/reschedule", async (req, res) => {
     mailReady();
-    const old = managed(req.params.token);
-    need(
-      old.status === "scheduled" &&
-        DateTime.fromISO(old.start) > DateTime.now(),
-      409,
-      "This appointment cannot be rescheduled.",
-    );
-    const u = get("SELECT * FROM users WHERE id=?", old.user_id),
-      e = get("SELECT * FROM event_types WHERE id=?", old.event_id);
-    need(e.active, 409, "This event type is no longer accepting bookings.");
-    const input = z
-        .object({
-          start: z.iso.datetime({ offset: true }),
-          timezone: zoneSchema,
-        })
-        .parse(req.body),
-      start = DateTime.fromISO(input.start).toUTC().toISO(),
-      end = DateTime.fromISO(start)
-        .plus({ minutes: e.duration })
-        .toUTC()
-        .toISO();
-    need(start !== old.start, 400, "Choose a different appointment time.");
-    const available = await slots(
-      u,
-      e,
-      DateTime.fromISO(start).setZone(input.timezone).toISODate(),
-      input.timezone,
-    );
-    need(
-      available.includes(start),
-      409,
-      "That time is no longer available. Please choose another time.",
-    );
-    const reservation = randomUUID();
-    db.exec("BEGIN IMMEDIATE");
-    try {
+    return withBookingLock(managed(req.params.token), async () => {
+      const old = managed(req.params.token);
       need(
         !get(
-          "SELECT id FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND start<? AND end>?",
-          u.id,
-          DateTime.fromISO(end).plus({ minutes: u.buffer }).toUTC().toISO(),
-          DateTime.fromISO(start).minus({ minutes: u.buffer }).toUTC().toISO(),
+          "SELECT id FROM bookings WHERE parent_id=? AND status='pending'",
+          old.id,
         ),
         409,
-        "That time was just booked. Please choose another time.",
+        "Resolve the pending reschedule before making another change.",
       );
-      // Reserve the new slot while retaining the original appointment until Google confirms the update.
-      run(
-        "INSERT INTO bookings(id,event_id,user_id,name,email,notes,timezone,start,end,status,manage_hash,title,location,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        reservation,
-        e.id,
-        u.id,
-        old.name,
-        old.email,
-        old.notes,
+      need(
+        old.status === "scheduled" &&
+          DateTime.fromISO(old.start) > DateTime.now(),
+        409,
+        "This appointment cannot be rescheduled.",
+      );
+      const u = await boundUser(old),
+        e = get("SELECT * FROM event_types WHERE id=?", old.event_id);
+      need(
+        u.active && e.active,
+        409,
+        "This event type is no longer accepting bookings.",
+      );
+      const input = z
+          .object({
+            start: z.iso.datetime({ offset: true }),
+            timezone: zoneSchema,
+          })
+          .parse(req.body),
+        start = DateTime.fromISO(input.start).toUTC().toISO(),
+        end = DateTime.fromISO(start)
+          .plus({ minutes: e.duration })
+          .toUTC()
+          .toISO();
+      need(
+        start !== old.start,
+        400,
+        "Choose a different appointment time.",
+      );
+      const available = await slots(
+        u,
+        e,
+        DateTime.fromISO(start).setZone(input.timezone).toISODate(),
         input.timezone,
-        start,
-        end,
-        "pending",
-        hash(token()),
-        old.title,
-        old.location,
-        new Date().toISOString(),
+        old,
       );
-      run(
-        "UPDATE bookings SET operation='reschedule',parent_id=?,google_id=? WHERE id=?",
-        old.id,
-        old.google_id,
-        reservation,
+      need(
+        available.includes(start),
+        409,
+        "That time is no longer available. Please choose another time.",
       );
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
-    try {
-      if (old.google_id) {
-        if (config.calendarProvider)
-          await config.calendarProvider.update(u, old, { start, end });
-        else
-          await google(
-            u,
-            `calendars/primary/events/${encodeURIComponent(old.google_id)}?sendUpdates=all`,
-            "PATCH",
-            { start: { dateTime: start }, end: { dateTime: end } },
-          );
-      }
+      const currentHost = get("SELECT * FROM users WHERE id=?", u.id);
+      need(
+        currentHost.active &&
+          currentHost.google_refresh === u.google_refresh &&
+          !connectionChanges.has(u.id),
+        409,
+        "The host connection changed. Please try again.",
+      );
+      const reservation = randomUUID();
       db.exec("BEGIN IMMEDIATE");
       try {
+        need(
+          !get(
+            "SELECT id FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND id<>? AND start<? AND end>?",
+            u.id,
+            old.id,
+            DateTime.fromISO(end)
+              .plus({ minutes: u.buffer })
+              .toUTC()
+              .toISO(),
+            DateTime.fromISO(start)
+              .minus({ minutes: u.buffer })
+              .toUTC()
+              .toISO(),
+          ),
+          409,
+          "That time was just booked. Please choose another time.",
+        );
+        // Reserve the new slot while retaining the original appointment until Google confirms the update.
         run(
-          "UPDATE bookings SET start=?,end=?,timezone=? WHERE id=?",
+          "INSERT INTO bookings(id,event_id,user_id,name,email,notes,timezone,start,end,status,manage_hash,title,location,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          reservation,
+          e.id,
+          u.id,
+          old.name,
+          old.email,
+          old.notes,
+          input.timezone,
           start,
           end,
-          input.timezone,
-          old.id,
+          "pending",
+          hash(token()),
+          old.title,
+          old.location,
+          new Date().toISOString(),
         );
-        run("DELETE FROM bookings WHERE id=?", reservation);
+        run(
+          "UPDATE bookings SET operation='reschedule',parent_id=?,google_id=?,google_account=?,google_calendar=? WHERE id=?",
+          old.id,
+          old.google_id,
+          old.google_account,
+          old.google_calendar,
+          reservation,
+        );
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");
         throw error;
       }
-    } catch (error) {
-      if (error.providerStatus >= 400 && error.providerStatus < 500)
-        run("UPDATE bookings SET status='failed' WHERE id=?", reservation);
-      else {
-        enqueue(
-          u.email,
-          "Rescheduling needs a calendar check",
-          mailPage(
-            "Please check a rescheduling request",
-            `<p>The calendar response was uncertain. Both times remain reserved until you check the appointment status.</p>${mailLink("Check calendar status", config.baseUrl + "/app/bookings")}`,
-          ),
+      try {
+        if (old.google_id) {
+          if (config.calendarProvider)
+            await config.calendarProvider.update(u, old, { start, end });
+          else
+            await google(
+              u,
+              `${calendarPath(u, old)}/${encodeURIComponent(old.google_id)}?sendUpdates=all`,
+              "PATCH",
+              { start: { dateTime: start }, end: { dateTime: end } },
+            );
+        }
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          run(
+            "UPDATE bookings SET start=?,end=?,timezone=? WHERE id=?",
+            start,
+            end,
+            input.timezone,
+            old.id,
+          );
+          run("DELETE FROM bookings WHERE id=?", reservation);
+          bookingMail(
+            get("SELECT * FROM bookings WHERE id=?", old.id),
+            u,
+            req.params.token,
+            true,
+          );
+          db.exec("COMMIT");
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
+      } catch (error) {
+        if (error.providerStatus >= 400 && error.providerStatus < 500)
+          run(
+            "UPDATE bookings SET status='failed' WHERE id=?",
+            reservation,
+          );
+        else {
+          enqueue(
+            u.email,
+            "Rescheduling needs a calendar check",
+            mailPage(
+              "Please check a rescheduling request",
+              `<p>The calendar response was uncertain. Both times remain reserved until you check the appointment status.</p>${mailLink("Check calendar status", config.baseUrl + "/app/bookings")}`,
+            ),
+          );
+          void flushMail();
+        }
+        throw new HttpError(
+          503,
+          "The calendar did not confirm the change. Please contact the host before trying again.",
         );
-        await flushMail();
       }
-      throw new HttpError(
-        503,
-        "The calendar did not confirm the change. Please contact the host before trying again.",
-      );
-    }
-    const b = get("SELECT * FROM bookings WHERE id=?", old.id);
-    bookingMail(b, u, req.params.token, true);
-    await flushMail();
-    res.json({ booking: cleanBooking(b) });
+      const b = get("SELECT * FROM bookings WHERE id=?", old.id);
+      void flushMail();
+      res.json({ booking: cleanBooking(b) });
+    });
   });
   app.post("/api/bookings/:id/reconcile", auth, async (req, res) => {
     const b = get("SELECT * FROM bookings WHERE id=?", req.params.id);
@@ -1473,103 +2191,225 @@ export function createApp(options = {}) {
       404,
       "Appointment not found.",
     );
-    need(
-      b.status === "pending",
-      409,
-      "This appointment does not need reconciliation.",
-    );
-    need(
-      Date.now() - Date.parse(b.created) > 60_000,
-      409,
-      "Please wait one minute for Google to finish processing, then check again.",
-    );
-    const u = get("SELECT * FROM users WHERE id=?", b.user_id);
-    let remote;
-    try {
-      remote = config.calendarProvider
-        ? await config.calendarProvider.lookup(u, b)
-        : await google(
-            u,
-            `calendars/primary/events/${encodeURIComponent(b.google_id)}`,
-          );
-    } catch (error) {
-      if (error.providerStatus === 404 || error.providerStatus === 410)
-        remote = null;
-      else throw error;
-    }
-    const sameTime =
-      remote &&
-      remote.status !== "cancelled" &&
-      DateTime.fromISO(remote.start?.dateTime || "").toMillis() ===
-        DateTime.fromISO(b.start).toMillis() &&
-      DateTime.fromISO(remote.end?.dateTime || "").toMillis() ===
-        DateTime.fromISO(b.end).toMillis();
-    if (!sameTime) {
+    return withBookingLock(b, async () => {
       if (
-        b.operation === "reschedule" &&
-        remote &&
-        remote.status !== "cancelled"
+        b.status === "scheduled" &&
+        ["pending", "failed"].includes(b.meet_state)
       ) {
-        const original = get("SELECT * FROM bookings WHERE id=?", b.parent_id);
-        need(
-          original &&
-            DateTime.fromISO(remote.start?.dateTime || "").toMillis() ===
-              DateTime.fromISO(original.start).toMillis(),
-          409,
-          "Google has a different appointment time. Review the event in Google Calendar before making further changes.",
+        await recoverMeet(b);
+        return res.json({
+          message:
+            "Meeting link checked. Refresh the appointment for its latest status.",
+        });
+      }
+      need(
+        b.status === "pending",
+        409,
+        "This appointment does not need reconciliation.",
+      );
+      need(
+        Date.now() - Date.parse(b.operation_started || b.created) > 60_000,
+        409,
+        "Please wait one minute for Google to finish processing, then check again.",
+      );
+      const u = await boundUser(b);
+      let remote;
+      try {
+        remote = await lookupEvent(u, b);
+      } catch (error) {
+        if (error.providerStatus === 404 || error.providerStatus === 410)
+          remote = null;
+        else throw error;
+      }
+      if (b.operation === "cancel") {
+        if (!remote || remote.status === "cancelled")
+          finishCancellation(b, u);
+        else
+          run(
+            "UPDATE bookings SET status='scheduled',operation='create' WHERE id=?",
+            b.id,
+          );
+        return res.json({
+          message:
+            !remote || remote.status === "cancelled"
+              ? "Cancellation confirmed. Emails queued."
+              : "Google still has this appointment. You can retry cancellation.",
+        });
+      }
+      const sameTime =
+        remote &&
+        remote.status !== "cancelled" &&
+        DateTime.fromISO(remote.start?.dateTime || "").toMillis() ===
+          DateTime.fromISO(b.start).toMillis() &&
+        DateTime.fromISO(remote.end?.dateTime || "").toMillis() ===
+          DateTime.fromISO(b.end).toMillis();
+      if (!sameTime) {
+        if (
+          b.operation === "reschedule" &&
+          remote &&
+          remote.status !== "cancelled"
+        ) {
+          const original = get(
+            "SELECT * FROM bookings WHERE id=?",
+            b.parent_id,
+          );
+          need(
+            original &&
+              DateTime.fromISO(remote.start?.dateTime || "").toMillis() ===
+                DateTime.fromISO(original.start).toMillis() &&
+              DateTime.fromISO(remote.end?.dateTime || "").toMillis() ===
+                DateTime.fromISO(original.end).toMillis(),
+            409,
+            "Google has a different appointment time. Review the event in Google Calendar before making further changes.",
+          );
+        } else
+          need(
+            !remote || remote.status === "cancelled",
+            409,
+            "Google has a different appointment time. Please review this event in Google Calendar.",
+          );
+        run("UPDATE bookings SET status='failed' WHERE id=?", b.id);
+        return res.json({
+          message:
+            "Google did not apply this request. The extra reservation has been released.",
+        });
+      }
+      const manage = token();
+      let id = b.id;
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (b.operation === "reschedule") {
+          id = b.parent_id;
+          run(
+            "UPDATE bookings SET start=?,end=?,timezone=? WHERE id=?",
+            b.start,
+            b.end,
+            b.timezone,
+            id,
+          );
+          run("DELETE FROM bookings WHERE id=?", b.id);
+        } else
+          run(
+            "UPDATE bookings SET status='scheduled',google_id=?,meet_url=?,manage_hash=?,meet_state=? WHERE id=?",
+            remote.id,
+            b.location === "Zoom" ? b.meet_url : remote.hangoutLink || null,
+            hash(manage),
+            b.location === "Google Meet" && !remote.hangoutLink
+              ? "pending"
+              : "none",
+            b.id,
+          );
+        bookingMail(
+          get("SELECT * FROM bookings WHERE id=?", id),
+          u,
+          b.operation === "reschedule" ? null : manage,
+          b.operation === "reschedule",
         );
-      } else
-        need(
-          !remote || remote.status === "cancelled",
-          409,
-          "Google has a different appointment time. Please review this event in Google Calendar.",
-        );
-      run("UPDATE bookings SET status='failed' WHERE id=?", b.id);
-      return res.json({
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      void flushMail();
+      res.json({
         message:
-          "Google did not apply this request. The extra reservation has been released.",
+          "Appointment confirmed against Google Calendar. Confirmation emails have been queued.",
       });
-    }
-    const manage = token();
-    let id = b.id;
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      if (b.operation === "reschedule") {
-        id = b.parent_id;
-        run(
-          "UPDATE bookings SET start=?,end=?,timezone=?,manage_hash=? WHERE id=?",
-          b.start,
-          b.end,
-          b.timezone,
-          hash(manage),
-          id,
-        );
-        run("DELETE FROM bookings WHERE id=?", b.id);
-      } else
-        run(
-          "UPDATE bookings SET status='scheduled',google_id=?,meet_url=?,manage_hash=? WHERE id=?",
-          remote.id,
-          b.location === "Zoom" ? b.meet_url : remote.hangoutLink || null,
-          hash(manage),
-          b.id,
-        );
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
-    bookingMail(
-      get("SELECT * FROM bookings WHERE id=?", id),
-      u,
-      manage,
-      b.operation === "reschedule",
-    );
-    await flushMail();
-    res.json({
-      message:
-        "Appointment confirmed against Google Calendar. Confirmation emails have been queued.",
     });
   });
+  let closed = false,
+    recovering = false;
+  async function recoverMeet(b) {
+    try {
+      const u = await boundUser(b),
+        remote = await lookupEvent(u, b);
+      const link =
+        remote.hangoutLink ||
+        remote.conferenceData?.entryPoints?.find(
+          (p) => p.entryPointType === "video",
+        )?.uri;
+      if (closed) return;
+      const fresh = get("SELECT * FROM bookings WHERE id=?", b.id);
+      if (fresh?.status !== "scheduled" || fresh.meet_url) return;
+      if (link && /^https:\/\/meet\.google\.com\//.test(link)) {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          run(
+            "UPDATE bookings SET meet_url=?,meet_state='ready' WHERE id=?",
+            link,
+            b.id,
+          );
+          const body = `<p>${esc(b.title)}</p>${mailLink("Join Google Meet", link)}`;
+          enqueue(
+            b.email,
+            `Meeting link ready: ${b.title}`,
+            mailPage("Your Google Meet link", body),
+          );
+          enqueue(
+            u.email,
+            `Meeting link ready: ${b.title}`,
+            mailPage("Your Google Meet link", body),
+          );
+          db.exec("COMMIT");
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
+        void flushMail();
+        return;
+      }
+      if (
+        remote.status === "cancelled" ||
+        remote.conferenceData?.createRequest?.status?.statusCode ===
+          "failure"
+      ) {
+        run("UPDATE bookings SET meet_state='failed' WHERE id=?", b.id);
+        enqueue(
+          u.email,
+          "Google Meet link needs attention",
+          mailPage(
+            "Check the meeting link",
+            `<p>${esc(b.title)} has no usable meeting link. Review it in Google Calendar and check its status again in Bookings.</p>`,
+          ),
+        );
+        return;
+      }
+    } catch {
+      /* Retain the appointment and retry without creating another event. */
+    }
+    if (!closed)
+      run(
+        "UPDATE bookings SET meet_attempts=meet_attempts+1,meet_retry_at=? WHERE id=?",
+        Date.now() +
+          Math.min(3600000, 15000 * 2 ** Math.min(b.meet_attempts, 8)),
+        b.id,
+      );
+  }
+  async function recoverMeetLinks() {
+    if (recovering || closed) return;
+    recovering = true;
+    try {
+      for (const b of all(
+        "SELECT * FROM bookings WHERE status='scheduled' AND meet_state='pending' AND meet_retry_at<=? AND end>? ORDER BY meet_retry_at LIMIT 5",
+        Date.now(),
+        new Date().toISOString(),
+      )) {
+        if (closed) return;
+        if (
+          appointmentLocks.has(b.id) ||
+          get(
+            "SELECT id FROM bookings WHERE parent_id=? AND status='pending'",
+            b.id,
+          )
+        )
+          continue;
+        await withBookingLock(b, () => recoverMeet(b));
+      }
+    } finally {
+      recovering = false;
+    }
+  }
+
   app.get("/api/google/connect", auth, (req, res) => {
     need(
       config.googleId && config.googleSecret && config.encryptionKey,
@@ -1587,7 +2427,9 @@ export function createApp(options = {}) {
       access_type: "offline",
       prompt: "consent",
       state,
-      code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+      code_challenge: createHash("sha256")
+        .update(verifier)
+        .digest("base64url"),
       code_challenge_method: "S256",
     });
     res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
@@ -1640,13 +2482,66 @@ export function createApp(options = {}) {
       "https://openidconnect.googleapis.com/v1/userinfo",
       { headers: { Authorization: `Bearer ${data.access_token}` } },
     );
-    need(info.email_verified, 400, "Please use a verified Google account.");
+    need(
+      info.email_verified &&
+        typeof info.email === "string" &&
+        typeof info.sub === "string",
+      400,
+      "Please use a verified Google account.",
+    );
+    const fresh = get("SELECT * FROM users WHERE id=?", req.user.id);
+    need(
+      fresh.active &&
+        get(
+          "SELECT hash FROM sessions WHERE hash=? AND expires>?",
+          hash(req.cookies.bmt_session),
+          Date.now(),
+        ),
+      403,
+      "Your session is no longer active. Please sign in again.",
+    );
+    need(
+      !connectionChanges.has(fresh.id),
+      409,
+      "Another calendar connection change is in progress.",
+    );
+    const sameAccount = fresh.google_account
+      ? fresh.google_account === info.sub
+      : fresh.google_email?.toLowerCase() === info.email.toLowerCase();
+    // Unbound legacy records do not prove which account owns them. Permit a
+    // corrective reconnect, but preserve every established appointment binding.
+    need(
+      sameAccount ||
+        !get(
+          "SELECT id FROM bookings WHERE user_id=? AND (google_account IS NOT NULL OR google_calendar IS NOT NULL) AND (status='pending' OR (status='scheduled' AND end>?))",
+          fresh.id,
+          new Date().toISOString(),
+        ),
+      409,
+      "Existing appointments belong to your original Google account. Reconnect that account before switching calendars.",
+    );
+    // A stable Google subject can acquire a new email address. Keep the
+    // established calendar identifier so existing appointments stay aligned.
+    const nextCalendar = sameAccount
+      ? fresh.google_calendar ||
+        fresh.google_email?.toLowerCase() ||
+        info.email.toLowerCase()
+      : info.email.toLowerCase();
     run(
-      "UPDATE users SET google_refresh=?,google_email=? WHERE id=?",
+      "UPDATE users SET google_refresh=?,google_email=?,google_account=?,google_calendar=? WHERE id=?",
       encrypt(data.refresh_token),
       info.email,
+      info.sub,
+      nextCalendar,
       req.user.id,
     );
+    if (sameAccount && fresh.google_email)
+      run(
+        "UPDATE bookings SET google_account=? WHERE user_id=? AND google_account=?",
+        info.sub,
+        fresh.id,
+        fresh.google_email.toLowerCase(),
+      );
     res.redirect(
       (req.user.onboarded ? "/app/settings" : "/app/setup") +
         "?google=connected",
@@ -1654,29 +2549,36 @@ export function createApp(options = {}) {
   });
   app.post("/api/google/disconnect", auth, async (req, res) => {
     need(
-      !get(
-        "SELECT id FROM bookings WHERE user_id=? AND status='scheduled' AND start>?",
-        req.user.id,
-        new Date().toISOString(),
-      ),
+      !hasOpenBookings(req.user.id),
       409,
-      "Cancel your upcoming appointments before disconnecting your calendar.",
+      "Resolve pending requests and cancel upcoming appointments before disconnecting your calendar.",
     );
-    if (req.user.google_refresh) {
-      await request("https://oauth2.googleapis.com/revoke", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ token: decrypt(req.user.google_refresh) }),
-      });
+    need(
+      !connectionChanges.has(req.user.id),
+      409,
+      "Another calendar connection change is in progress.",
+    );
+    connectionChanges.add(req.user.id);
+    try {
+      if (req.user.google_refresh) {
+        await request("https://oauth2.googleapis.com/revoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            token: decrypt(req.user.google_refresh),
+          }),
+        });
+      }
+      run("UPDATE users SET google_refresh=NULL WHERE id=?", req.user.id);
+      res.json({ ok: true });
+    } finally {
+      connectionChanges.delete(req.user.id);
     }
-    run(
-      "UPDATE users SET google_refresh=NULL,google_email=NULL WHERE id=?",
-      req.user.id,
-    );
-    res.json({ ok: true });
   });
   if (config.demo) {
-    if (!get("SELECT id FROM users WHERE email=?", "demo@bmtcalendar.local")) {
+    if (
+      !get("SELECT id FROM users WHERE email=?", "demo@bmtcalendar.local")
+    ) {
       const u = addUser({
         name: "Alex Morgan",
         email: "demo@bmtcalendar.local",
@@ -1744,10 +2646,13 @@ export function createApp(options = {}) {
         error: "This item already exists or conflicts with another record.",
       });
     console.error("Unhandled server error:", error.name, error.message);
-    res.status(500).json({ error: "Something went wrong. Please try again." });
+    res
+      .status(500)
+      .json({ error: "Something went wrong. Please try again." });
   });
   const interval = setInterval(() => {
     void flushMail();
+    void recoverMeetLinks();
     const now = Date.now();
     for (const [key, v] of limits) if (v.until < now) limits.delete(key);
     run("DELETE FROM sessions WHERE expires<?", now);
@@ -1759,7 +2664,9 @@ export function createApp(options = {}) {
     db,
     config,
     flushMail,
+    recoverMeetLinks,
     close: () => {
+      closed = true;
       clearInterval(interval);
       db.close();
     },

@@ -1,8 +1,8 @@
 import { chromium } from "@playwright/test";
 import { createApp } from "../server.js";
 import assert from "node:assert/strict";
-import { mkdirSync, existsSync } from "node:fs";
-import { DateTime } from "luxon";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
+import { DateTime, Settings } from "luxon";
 import sharp from "sharp";
 
 const testMail = [];
@@ -28,12 +28,17 @@ try {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1100 },
   });
+  context.setDefaultTimeout(10000);
   const page = await context.newPage();
   page.on("pageerror", (err) => errors.push(err.message));
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
   });
-  for (const route of ["/login", "/signup", "/reset?token=test-placeholder"]) {
+  for (const route of [
+    "/login",
+    "/signup",
+    "/reset?token=test-placeholder",
+  ]) {
     await page.goto("http://localhost:3199" + route);
     const passwordInput = page.locator("#password");
     await passwordInput.fill("A strong test password 123!");
@@ -68,7 +73,9 @@ try {
   await page
     .getByRole("button", { name: "Create account", exact: true })
     .click();
-  await page.getByText("Check your email to verify your account.").waitFor();
+  await page
+    .getByText("Check your email to verify your account.")
+    .waitFor();
   const verificationToken = testMail
     .find((item) => item.subject.includes("Verify"))
     .html.match(/verify\?token=([a-f0-9]+)/)[1];
@@ -108,7 +115,9 @@ try {
       .png()
       .toBuffer(),
   });
-  await page.getByRole("button", { name: "Save photo", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Save photo", exact: true })
+    .click();
   await page.locator(".photo-preview img").waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(
@@ -135,6 +144,35 @@ try {
     busy: async () => [],
     create: async () => ({}),
   };
+  const savedPhoto = service.db
+    .prepare("SELECT photo FROM users WHERE id=?")
+    .get(pendingOwner.id).photo;
+  service.db
+    .prepare("UPDATE users SET photo=NULL WHERE id=?")
+    .run(pendingOwner.id);
+  await page.reload();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Continue to workspace" })
+      .isEnabled(),
+    false,
+    "Google alone cannot complete setup",
+  );
+  assert.equal(
+    (
+      await page.request.post("http://localhost:3199/api/me/onboarding", {
+        data: {},
+      })
+    ).status(),
+    409,
+  );
+  assert.equal(
+    (await page.request.get("http://localhost:3199/api/bookings")).status(),
+    403,
+  );
+  service.db
+    .prepare("UPDATE users SET photo=? WHERE id=?")
+    .run(savedPhoto, pendingOwner.id);
   await page.reload();
   await page.getByRole("button", { name: "Continue to workspace" }).click();
   await page
@@ -186,18 +224,82 @@ try {
   console.log(
     "PASS browser: create event type and persist it across navigation",
   );
-  await page.getByRole("link", { name: "Availability", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Availability", exact: true })
+    .click();
   await page
     .getByRole("heading", { name: "Make time on your terms" })
     .waitFor();
   await page.getByLabel("Monday", { exact: true }).check();
   await page.getByLabel("Minimum booking notice").selectOption("0");
-  await page.getByRole("button", { name: "Save availability" }).click();
-  await page
-    .getByText("Availability saved. Your booking page is up to date.")
-    .waitFor();
+  const saveAvailability = async () => {
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/me" &&
+          response.request().method() === "PATCH",
+      ),
+      page
+        .getByRole("button", { name: "Save availability", exact: true })
+        .click(),
+    ]);
+    assert.equal(response.status(), 200, "Availability save succeeds");
+    // Consecutive saves can leave more than one five-second toast visible.
+    await page
+      .getByText("Availability saved. Your booking page is up to date.", {
+        exact: true,
+      })
+      .last()
+      .waitFor();
+  };
+  await saveAvailability();
   completed++;
   console.log("PASS browser: save weekly availability");
+  await page.getByLabel("Monday end", { exact: true }).fill("12:00");
+  await page
+    .getByRole("button", { name: "Add Monday hours", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Add date override", exact: true })
+    .click();
+  const closedDate = DateTime.now().plus({ days: 10 }).toISODate();
+  await page.locator("[data-override-date]").fill(closedDate);
+  await saveAvailability();
+  await page.reload();
+  await page.getByLabel("Monday start", { exact: true }).first().waitFor();
+  assert.equal(
+    await page.getByLabel("Monday start", { exact: true }).count(),
+    2,
+  );
+  assert.equal(
+    await page
+      .getByLabel("Monday end", { exact: true })
+      .first()
+      .inputValue(),
+    "12:00",
+  );
+  assert.equal(
+    await page.locator("[data-override-date]").inputValue(),
+    closedDate,
+  );
+  completed++;
+  console.log(
+    "PASS browser: split working hours and holiday override persist after reload",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+    true,
+    "Split hours and date overrides fit mobile",
+  );
+  await page.screenshot({
+    path: "test-results/availability-mobile.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.setViewportSize({ width: 1440, height: 1100 });
   await page.getByRole("link", { name: "Overview", exact: true }).click();
   await page
     .getByRole("heading", { name: "Your appointments", exact: true })
@@ -218,11 +320,14 @@ try {
       viewport: { width: 1280, height: 950 },
     }),
     booking = await guest.newPage();
+  guest.setDefaultTimeout(10000);
   booking.on("pageerror", (err) => errors.push(err.message));
   await booking.goto(
     `http://localhost:3199/book/${me.user.slug}/${event.slug}`,
   );
-  await booking.getByRole("heading", { name: "Find your moment" }).waitFor();
+  await booking
+    .getByRole("heading", { name: "Find your moment" })
+    .waitFor();
   // Choose a future weekday with availability, allowing month boundaries.
   let day = DateTime.now().setZone(me.user.timezone).plus({ days: 1 });
   while (day.weekday > 5) day = day.plus({ days: 1 });
@@ -242,7 +347,9 @@ try {
   await booking
     .getByLabel(/Anything you’d like us to know/)
     .fill("Looking forward to meeting.");
-  await booking.getByRole("button", { name: "Confirm appointment" }).click();
+  await booking
+    .getByRole("button", { name: "Confirm appointment" })
+    .click();
   await booking
     .getByRole("heading", { name: "You’re on the calendar." })
     .waitFor();
@@ -293,18 +400,26 @@ try {
   await page.getByRole("link", { name: "Bookings", exact: true }).click();
   await page.getByLabel("Filter appointments").selectOption("cancelled");
   await page.getByText("Jamie Client", { exact: true }).waitFor();
-  await page.getByRole("link", { name: "My calendar", exact: true }).click();
-  await page.getByRole("heading", { name: "A little perspective" }).waitFor();
+  await page
+    .getByRole("link", { name: "My calendar", exact: true })
+    .click();
+  await page
+    .getByRole("heading", { name: "A little perspective" })
+    .waitFor();
   await page.getByRole("link", { name: "Team", exact: true }).click();
   await page
     .getByRole("heading", { name: "Good people. Better together." })
     .waitFor();
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   await page.getByLabel("Full name").fill("Alex Morgan");
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
   await page.getByText("Profile updated.").waitFor();
   completed++;
-  console.log("PASS browser: bookings, calendar, team and profile settings");
+  console.log(
+    "PASS browser: bookings, calendar, team and profile settings",
+  );
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("http://localhost:3199/app");
   await page
@@ -330,7 +445,9 @@ try {
   await booking.goto(
     `http://localhost:3199/book/${me.user.slug}/${event.slug}`,
   );
-  await booking.getByRole("heading", { name: "Find your moment" }).waitFor();
+  await booking
+    .getByRole("heading", { name: "Find your moment" })
+    .waitFor();
   assert.equal(
     await booking.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -344,6 +461,221 @@ try {
   });
   completed++;
   console.log("PASS browser: mobile layout and navigation");
+  // Closed dates are explicitly disabled in the guest's time zone.
+  await booking
+    .getByLabel("Your time zone", { exact: true })
+    .selectOption(me.user.timezone);
+  const closed = DateTime.fromISO(closedDate);
+  if (closed.month !== DateTime.now().month)
+    await booking.getByRole("button", { name: "Next month" }).click();
+  await booking
+    .locator(`[data-date="${closedDate}"].closed-date`)
+    .waitFor();
+  assert.equal(
+    await booking.locator(`[data-date="${closedDate}"]`).isDisabled(),
+    true,
+  );
+  completed++;
+  console.log("PASS browser: holiday dates displayed as closed");
+
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto("http://localhost:3199/app/events");
+  await page
+    .getByRole("button", { name: "Create event type", exact: true })
+    .click();
+  await page.getByLabel("What’s the occasion?").fill("Phone planning");
+  await page
+    .getByLabel("Where", { exact: true })
+    .selectOption("Phone call");
+  await page
+    .getByLabel("Calling instructions or meeting address")
+    .fill("We will call the number you provide.");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Create event type", exact: true })
+    .click();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  const phoneEvent = (
+    await (
+      await page.request.get("http://localhost:3199/api/events")
+    ).json()
+  ).events.find((e) => e.title === "Phone planning");
+  await booking.goto(
+    `http://localhost:3199/book/${me.user.slug}/${phoneEvent.slug}`,
+  );
+  await booking
+    .getByText("We will call the number you provide.", { exact: true })
+    .waitFor();
+  await booking
+    .getByLabel("Your time zone", { exact: true })
+    .selectOption(me.user.timezone);
+  if (day.month !== DateTime.now().month)
+    await booking.getByRole("button", { name: "Next month" }).click();
+  await booking.getByRole("button", { name: dayName, exact: true }).click();
+  await booking.locator(".slot").first().click();
+  await booking.getByLabel("Your name").fill("Phone Client");
+  await booking
+    .getByLabel("Email address", { exact: true })
+    .fill("phone@example.com");
+  assert.equal(
+    await booking.getByLabel("Phone number").getAttribute("required"),
+    "",
+  );
+  await booking.getByLabel("Phone number").fill("+1 212 555 0100");
+  await booking
+    .getByRole("button", { name: "Confirm appointment" })
+    .click();
+  await booking
+    .getByRole("heading", { name: "You’re on the calendar." })
+    .waitFor();
+  await booking.getByText("Guest phone: +1 212 555 0100").waitFor();
+  completed++;
+  console.log(
+    "PASS browser: phone instructions and required guest number survive confirmation",
+  );
+  const phoneManageUrl = await booking
+    .getByRole("link", { name: "Manage appointment", exact: true })
+    .getAttribute("href");
+  service.db
+    .prepare(
+      "UPDATE bookings SET location='Google Meet',meet_state='pending',google_id='local-pending-meet' WHERE event_id=?",
+    )
+    .run(phoneEvent.id);
+  await booking.goto(phoneManageUrl);
+  await booking
+    .getByText(/Your Google Meet link is being prepared/)
+    .waitFor();
+  service.db
+    .prepare(
+      "UPDATE bookings SET meet_state='ready',meet_url='https://meet.google.com/abc-defg-hij' WHERE event_id=?",
+    )
+    .run(phoneEvent.id);
+  await booking.reload();
+  assert.equal(
+    await booking
+      .getByRole("link", { name: "Join meeting", exact: true })
+      .getAttribute("href"),
+    "https://meet.google.com/abc-defg-hij",
+  );
+  completed++;
+  console.log(
+    "PASS browser: pending Meet message changes to join link after recovery",
+  );
+
+  const insert = service.db.prepare(
+    "INSERT INTO bookings(id,event_id,user_id,name,email,timezone,start,end,status,manage_hash,title,location,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  );
+  service.db.exec("BEGIN");
+  for (let i = 0; i < 1205; i++)
+    insert.run(
+      "browser-export-" + i,
+      event.id,
+      me.user.id,
+      "Export Fixture " + i,
+      "fixture@example.com",
+      "UTC",
+      day.toUTC().toISO(),
+      day.plus({ minutes: 30 }).toUTC().toISO(),
+      "cancelled",
+      "browser-hash-" + i,
+      "Export appointment",
+      "Phone call",
+      new Date().toISOString(),
+    );
+  service.db.exec("COMMIT");
+  await page.goto("http://localhost:3199/app/bookings");
+  await page.getByLabel("Filter appointments").selectOption("cancelled");
+  await page.getByLabel("Search appointments").fill("Export Fixture");
+  assert.equal(await page.locator(".booking-table tbody tr").count(), 1205);
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export CSV" }).click();
+  const file = await download;
+  await file.saveAs("test-results/filtered-export.csv");
+  assert.equal(
+    readFileSync("test-results/filtered-export.csv", "utf8").split("\r\n")
+      .length,
+    1206,
+  );
+  completed++;
+  console.log(
+    "PASS browser: all 1205 filtered appointments display and export",
+  );
+
+  await page.goto("http://localhost:3199/app/team");
+  const ownerCard = page.locator(".team-card").filter({
+    has: page.getByRole("heading", {
+      name: "Account Owner",
+      exact: true,
+    }),
+  });
+  await ownerCard
+    .getByRole("button", { name: "Sign out all sessions" })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Confirm", exact: true })
+    .click();
+  await page.getByText("Sessions revoked.").waitFor();
+  await ownerCard
+    .getByRole("button", { name: "Deactivate", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Confirm", exact: true })
+    .click();
+  await ownerCard
+    .getByRole("button", { name: "Reactivate", exact: true })
+    .waitFor();
+  assert.equal(
+    service.db
+      .prepare("SELECT active FROM users WHERE id=?")
+      .get(pendingOwner.id).active,
+    0,
+  );
+  completed++;
+  console.log(
+    "PASS browser: administrator session revocation and staff deactivation",
+  );
+  const previousNow = Settings.now;
+  try {
+    Settings.now = () => Date.parse("2026-10-20T12:00:00Z");
+    await booking.clock.install({ time: new Date("2026-10-20T12:00:00Z") });
+    service.db.prepare("UPDATE users SET overrides=? WHERE id=?").run(
+      JSON.stringify([
+        {
+          date: "2026-11-01",
+          windows: [{ start: "00:00", end: "04:00" }],
+        },
+      ]),
+      me.user.id,
+    );
+    await booking.goto(
+      `http://localhost:3199/book/${me.user.slug}/${event.slug}`,
+    );
+    await booking
+      .getByLabel("Your time zone", { exact: true })
+      .selectOption("America/New_York");
+    await booking.getByRole("button", { name: "Next month" }).click();
+    await booking
+      .getByRole("button", { name: "November 1, 2026", exact: true })
+      .click();
+    await booking
+      .getByRole("button", { name: "1:00 AM GMT-4", exact: true })
+      .waitFor();
+    await booking
+      .getByRole("button", { name: "1:00 AM GMT-5", exact: true })
+      .waitFor();
+    await booking.screenshot({
+      path: "test-results/daylight-saving-mobile.png",
+      fullPage: true,
+    });
+    completed++;
+    console.log(
+      "PASS browser: repeated daylight-saving times show distinct UTC offsets",
+    );
+  } finally {
+    Settings.now = previousNow;
+  }
   assert.deepEqual(errors, [], "No browser errors");
   console.log(`${completed} browser workflows passed. No browser errors.`);
   await guest.close();
