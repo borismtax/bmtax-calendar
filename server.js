@@ -1,4 +1,5 @@
 import express from "express";
+import sharp from "sharp";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import { DatabaseSync } from "node:sqlite";
@@ -155,6 +156,25 @@ export function createApp(options = {}) {
     );
   if (!bookingColumns.includes("parent_id"))
     db.exec("ALTER TABLE bookings ADD COLUMN parent_id TEXT");
+  const userColumns = db
+    .prepare("PRAGMA table_info(users)")
+    .all()
+    .map((c) => c.name);
+  if (!userColumns.includes("photo"))
+    db.exec("ALTER TABLE users ADD COLUMN photo TEXT");
+  // Existing accounts keep dashboard access; newly created accounts start setup.
+  if (!userColumns.includes("onboarded"))
+    db.exec(
+      "ALTER TABLE users ADD COLUMN onboarded INTEGER NOT NULL DEFAULT 1",
+    );
+  const eventColumns = db
+    .prepare("PRAGMA table_info(event_types)")
+    .all()
+    .map((c) => c.name);
+  if (!eventColumns.includes("meeting_url"))
+    db.exec(
+      "ALTER TABLE event_types ADD COLUMN meeting_url TEXT NOT NULL DEFAULT ''",
+    );
   const get = (sql, ...params) => db.prepare(sql).get(...params);
   const all = (sql, ...params) => db.prepare(sql).all(...params);
   const run = (sql, ...params) => db.prepare(sql).run(...params);
@@ -177,6 +197,7 @@ export function createApp(options = {}) {
       },
     }),
   );
+  app.use("/api/me/photo", express.json({ limit: "3mb" }));
   app.use(express.json({ limit: "24kb" }));
   app.use(cookieParser());
   const limits = new Map();
@@ -223,6 +244,8 @@ export function createApp(options = {}) {
     buffer: u.buffer,
     googleConnected: !!u.google_refresh,
     googleEmail: u.google_email,
+    photo: u.photo || null,
+    onboardingComplete: !!u.onboarded,
   });
   const encrypt = (text) => {
     need(config.encryptionKey, 503, "Calendar encryption is not configured.");
@@ -273,6 +296,38 @@ export function createApp(options = {}) {
         "An external service is unavailable. Please try again shortly.",
       );
       error.providerStatus = response.status;
+      const reason =
+        data.error?.details?.find((detail) => detail.reason)?.reason ||
+        data.error?.errors?.[0]?.reason ||
+        "";
+      if (url.startsWith("https://www.googleapis.com/calendar/")) {
+        if (
+          ["SERVICE_DISABLED", "accessNotConfigured", "API_DISABLED"].includes(
+            reason,
+          ) ||
+          /has not been used|is disabled/i.test(data.error?.message || "")
+        ) {
+          error.message =
+            "Google Calendar API is not enabled for the host’s Google Cloud project. The host needs to enable it and try again.";
+          error.calendarCode = "API_DISABLED";
+        } else if (response.status === 401 || response.status === 403) {
+          error.message =
+            "Google denied calendar access. The host should reconnect Google Calendar in Settings and approve both calendar permissions.";
+          error.calendarCode = "ACCESS_DENIED";
+        } else if (response.status === 429) {
+          error.message =
+            "Google Calendar is receiving too many requests. Please try again in a few minutes.";
+          error.calendarCode = "RATE_LIMITED";
+        } else {
+          error.message =
+            "Google Calendar could not check availability right now. Please try again shortly.";
+          error.calendarCode = "GOOGLE_UNAVAILABLE";
+        }
+        console.warn("Google Calendar request failed", {
+          status: response.status,
+          code: error.calendarCode,
+        });
+      }
       throw error;
     }
     return data;
@@ -405,7 +460,7 @@ export function createApp(options = {}) {
     if (get("SELECT id FROM users WHERE slug=?", slug))
       slug += "-" + randomBytes(3).toString("hex");
     run(
-      "INSERT INTO users(id,name,email,password,slug,role,verified,windows,created) VALUES(?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO users(id,name,email,password,slug,role,verified,windows,created,onboarded) VALUES(?,?,?,?,?,?,?,?,?,?)",
       id,
       name,
       email,
@@ -415,6 +470,7 @@ export function createApp(options = {}) {
       verified,
       defaults,
       new Date().toISOString(),
+      0,
     );
     run(
       "INSERT INTO event_types(id,user_id,title,slug,duration,description) VALUES(?,?,?,?,?,?)",
@@ -467,12 +523,10 @@ export function createApp(options = {}) {
       "Team accounts require an invitation from your administrator.",
     );
     if (get("SELECT id FROM users WHERE email=?", body.email))
-      return res
-        .status(409)
-        .json({
-          error:
-            "An account already exists for this email. Sign in or reset your password.",
-        });
+      return res.status(409).json({
+        error:
+          "An account already exists for this email. Sign in or reset your password.",
+      });
     const user = addUser({
       ...body,
       role: body.email === config.ownerEmail ? "admin" : "member",
@@ -500,7 +554,10 @@ export function createApp(options = {}) {
     // A repeated verification must never issue another authenticated session.
     if (user.verified) return res.json({ alreadyVerified: true });
     run("UPDATE users SET verified=1 WHERE id=?", t.user_id);
-    run("UPDATE tokens SET data='verified' WHERE user_id=? AND kind='verify'", user.id);
+    run(
+      "UPDATE tokens SET data='verified' WHERE user_id=? AND kind='verify'",
+      user.id,
+    );
     session(res, user);
     res.json({ user: safeUser({ ...user, verified: 1 }) });
   });
@@ -647,6 +704,64 @@ export function createApp(options = {}) {
       user: safeUser(get("SELECT * FROM users WHERE id=?", req.user.id)),
     });
   });
+  app.put("/api/me/photo", auth, async (req, res) => {
+    const image = z
+      .string()
+      .max(2_800_000)
+      .regex(/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/)
+      .parse(req.body.image);
+    const bytes = Buffer.from(image.slice(image.indexOf(",") + 1), "base64");
+    need(
+      bytes.length <= 2 * 1024 * 1024,
+      400,
+      "Choose a photo smaller than 2 MB.",
+    );
+    let encoded;
+    try {
+      // Decode and re-encode to discard metadata and active or non-image content.
+      encoded = await sharp(bytes, {
+        limitInputPixels: 20_000_000,
+        animated: false,
+      })
+        .rotate()
+        .resize(256, 256, { fit: "cover" })
+        .flatten({ background: "#ffffff" })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+    } catch {
+      throw new HttpError(
+        400,
+        "Choose a valid JPG, PNG, or WebP photo smaller than 20 megapixels.",
+      );
+    }
+    run(
+      "UPDATE users SET photo=? WHERE id=?",
+      "data:image/jpeg;base64," + encoded.toString("base64"),
+      req.user.id,
+    );
+    res.json({
+      user: safeUser(get("SELECT * FROM users WHERE id=?", req.user.id)),
+    });
+  });
+  app.delete("/api/me/photo", auth, (req, res) => {
+    run("UPDATE users SET photo=NULL WHERE id=?", req.user.id);
+    res.json({
+      user: safeUser(get("SELECT * FROM users WHERE id=?", req.user.id)),
+    });
+  });
+  app.post("/api/me/onboarding", auth, async (req, res) => {
+    need(
+      req.user.google_refresh,
+      409,
+      "Connect Google Calendar before finishing setup.",
+    );
+    const now = DateTime.now().toUTC();
+    await busy(req.user, now.toISO(), now.plus({ days: 1 }).toISO());
+    run("UPDATE users SET onboarded=1 WHERE id=?", req.user.id);
+    res.json({
+      user: safeUser(get("SELECT * FROM users WHERE id=?", req.user.id)),
+    });
+  });
   app.get("/api/events", auth, (req, res) =>
     res.json({
       events: all(
@@ -655,21 +770,47 @@ export function createApp(options = {}) {
       ),
     }),
   );
-  const eventSchema = z.object({
-    title: z.string().trim().min(2).max(80),
-    duration: z.number().int().min(15).max(240).multipleOf(15),
-    description: z.string().max(2000).default(""),
-    location: z.enum(["Google Meet", "Phone call", "In person"]),
-    color: z.enum(["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#3b82f6"]),
-    active: z.boolean().default(true),
-  });
+  const eventSchema = z
+    .object({
+      title: z.string().trim().min(2).max(80),
+      duration: z.number().int().min(15).max(240).multipleOf(15),
+      description: z.string().max(2000).default(""),
+      location: z.enum(["Google Meet", "Zoom", "Phone call", "In person"]),
+      meetingUrl: z.string().trim().max(2048).default(""),
+      color: z.enum(["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#3b82f6"]),
+      active: z.boolean().default(true),
+    })
+    .superRefine((event, ctx) => {
+      if (event.location !== "Zoom") return;
+      let valid = false;
+      try {
+        const url = new URL(event.meetingUrl);
+        valid =
+          url.protocol === "https:" &&
+          !url.username &&
+          !url.password &&
+          (!url.port || url.port === "443") &&
+          ["zoom.us", "zoom.com", "zoomgov.com"].some(
+            (domain) =>
+              url.hostname === domain || url.hostname.endsWith("." + domain),
+          ) &&
+          /^\/(?:j\/\d+|s\/\d+|my\/[^/]+)(?:\/|$)/.test(url.pathname);
+      } catch {}
+      if (!valid)
+        ctx.addIssue({
+          code: "custom",
+          path: ["meetingUrl"],
+          message:
+            "Add a valid HTTPS Zoom meeting link (for example, https://us02web.zoom.us/j/1234567890).",
+        });
+    });
   app.post("/api/events", auth, (req, res) => {
     const b = eventSchema.parse(req.body);
     const id = randomUUID();
     const slug =
       (slugify(b.title) || "meeting") + "-" + randomBytes(2).toString("hex");
     run(
-      "INSERT INTO event_types VALUES(?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO event_types(id,user_id,title,slug,duration,description,location,color,active,meeting_url) VALUES(?,?,?,?,?,?,?,?,?,?)",
       id,
       req.user.id,
       b.title,
@@ -679,6 +820,7 @@ export function createApp(options = {}) {
       b.location,
       b.color,
       Number(b.active),
+      b.location === "Zoom" ? b.meetingUrl : "",
     );
     res
       .status(201)
@@ -696,13 +838,14 @@ export function createApp(options = {}) {
       "Event type not found.",
     );
     run(
-      "UPDATE event_types SET title=?,duration=?,description=?,location=?,color=?,active=? WHERE id=?",
+      "UPDATE event_types SET title=?,duration=?,description=?,location=?,color=?,active=?,meeting_url=? WHERE id=?",
       b.title,
       b.duration,
       b.description,
       b.location,
       b.color,
       Number(b.active),
+      b.location === "Zoom" ? b.meetingUrl : "",
       req.params.id,
     );
     res.json({ ok: true });
@@ -713,6 +856,7 @@ export function createApp(options = {}) {
         (u) => ({
           id: u.id,
           name: u.name,
+          photo: u.photo,
           slug: u.slug,
           role: u.role,
           ...(req.user.role === "admin"
@@ -812,6 +956,31 @@ export function createApp(options = {}) {
     );
     return [...local, ...data.calendars.primary.busy];
   }
+  app.get("/api/google/status", auth, async (req, res) => {
+    if (!req.user.google_refresh)
+      return res.json({
+        healthy: false,
+        code: "NOT_CONNECTED",
+        message: "Connect your Google Calendar first.",
+      });
+    try {
+      const start = DateTime.now().toUTC(),
+        end = start.plus({ days: 1 });
+      await busy(req.user, start.toISO(), end.toISO());
+      res.json({
+        healthy: true,
+        message: "Google Calendar availability is working.",
+      });
+    } catch (error) {
+      res.json({
+        healthy: false,
+        code: error.calendarCode || "RECONNECT_REQUIRED",
+        message: error.status
+          ? error.message
+          : "Google Calendar could not be reached. Please try again shortly.",
+      });
+    }
+  });
   function publicEvent(host, slug) {
     const u = get("SELECT * FROM users WHERE slug=? AND verified=1", host);
     need(u, 404, "This scheduling page was not found.");
@@ -894,7 +1063,12 @@ export function createApp(options = {}) {
     );
     need(u, 404, "This scheduling page was not found.");
     res.json({
-      host: { name: u.name, slug: u.slug, timezone: u.timezone },
+      host: {
+        name: u.name,
+        slug: u.slug,
+        timezone: u.timezone,
+        photo: u.photo,
+      },
       events: all(
         "SELECT title,slug,duration,description,location,color FROM event_types WHERE user_id=? AND active=1",
         u.id,
@@ -904,7 +1078,12 @@ export function createApp(options = {}) {
   app.get("/api/public/:host/:event", (req, res) => {
     const { u, e } = publicEvent(req.params.host, req.params.event);
     res.json({
-      host: { name: u.name, slug: u.slug, timezone: u.timezone },
+      host: {
+        name: u.name,
+        slug: u.slug,
+        timezone: u.timezone,
+        photo: u.photo,
+      },
       event: {
         title: e.title,
         slug: e.slug,
@@ -925,7 +1104,7 @@ export function createApp(options = {}) {
     const when = DateTime.fromISO(b.start)
       .setZone(b.timezone)
       .toFormat("cccc, LLLL d, yyyy · h:mm a ZZZZ");
-    const body = `<p>${esc(b.title)} with ${esc(u.name)}</p><p><strong>${esc(when)}</strong></p><p>${esc(b.location)}</p>${b.meet_url ? mailLink("Join Google Meet", b.meet_url) : ""}${manageToken ? mailLink("Manage appointment", `${config.baseUrl}/manage/${manageToken}`) : ""}`;
+    const body = `<p>${esc(b.title)} with ${esc(u.name)}</p><p><strong>${esc(when)}</strong></p><p>${esc(b.location)}</p>${b.meet_url ? mailLink(b.location === "Zoom" ? "Join Zoom" : "Join Google Meet", b.meet_url) : ""}${manageToken ? mailLink("Manage appointment", `${config.baseUrl}/manage/${manageToken}`) : ""}`;
     enqueue(
       b.email,
       `${changed ? "Updated" : "Confirmed"}: ${b.title}`,
@@ -950,7 +1129,7 @@ export function createApp(options = {}) {
       start: { dateTime: b.start },
       end: { dateTime: b.end },
       attendees: [{ email: b.email }, { email: u.email }],
-      location: e.location,
+      location: e.location === "Zoom" ? e.meeting_url : e.location,
     };
     if (e.location === "Google Meet")
       event.conferenceData = {
@@ -1041,8 +1220,9 @@ export function createApp(options = {}) {
     }
     // Deterministic Google IDs allow reconciliation after a timeout or a process restart.
     run(
-      "UPDATE bookings SET google_id=? WHERE id=?",
+      "UPDATE bookings SET google_id=?,meet_url=? WHERE id=?",
       id.replaceAll("-", ""),
+      e.location === "Zoom" ? e.meeting_url : null,
       id,
     );
     let remote;
@@ -1067,7 +1247,8 @@ export function createApp(options = {}) {
         "The calendar did not confirm this appointment. Please contact the host before trying again.",
       );
     }
-    const meet = remote.hangoutLink || null;
+    const meet =
+      e.location === "Zoom" ? e.meeting_url : remote.hangoutLink || null;
     run(
       "UPDATE bookings SET status='scheduled',google_id=?,meet_url=? WHERE id=?",
       remote.id || null,
@@ -1077,12 +1258,10 @@ export function createApp(options = {}) {
     const saved = get("SELECT * FROM bookings WHERE id=?", id);
     bookingMail(saved, u, manage);
     await flushMail();
-    res
-      .status(201)
-      .json({
-        booking: cleanBooking(saved),
-        manageUrl: `${config.baseUrl}/manage/${manage}`,
-      });
+    res.status(201).json({
+      booking: cleanBooking(saved),
+      manageUrl: `${config.baseUrl}/manage/${manage}`,
+    });
   });
   function managed(value) {
     need(
@@ -1100,7 +1279,7 @@ export function createApp(options = {}) {
       e = get("SELECT * FROM event_types WHERE id=?", b.event_id);
     res.json({
       booking: cleanBooking(b),
-      host: { name: u.name, slug: u.slug },
+      host: { name: u.name, slug: u.slug, photo: u.photo },
       event: { slug: e.slug, active: !!e.active },
     });
   });
@@ -1370,7 +1549,7 @@ export function createApp(options = {}) {
         run(
           "UPDATE bookings SET status='scheduled',google_id=?,meet_url=?,manage_hash=? WHERE id=?",
           remote.id,
-          remote.hangoutLink || null,
+          b.location === "Zoom" ? b.meet_url : remote.hangoutLink || null,
           hash(manage),
           b.id,
         );
@@ -1414,7 +1593,11 @@ export function createApp(options = {}) {
     res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
   });
   app.get("/api/google/callback", auth, async (req, res) => {
-    if (req.query.error) return res.redirect("/app/settings?google=denied");
+    if (req.query.error)
+      return res.redirect(
+        (req.user.onboarded ? "/app/settings" : "/app/setup") +
+          "?google=denied",
+      );
     const state = readToken(req.query.state, "oauth");
     need(
       state.user_id === req.user.id,
@@ -1464,7 +1647,10 @@ export function createApp(options = {}) {
       info.email,
       req.user.id,
     );
-    res.redirect("/app/settings?google=connected");
+    res.redirect(
+      (req.user.onboarded ? "/app/settings" : "/app/setup") +
+        "?google=connected",
+    );
   });
   app.post("/api/google/disconnect", auth, async (req, res) => {
     need(
@@ -1498,13 +1684,13 @@ export function createApp(options = {}) {
         role: "admin",
         verified: 1,
       });
-      run("UPDATE users SET notice=0 WHERE id=?", u.id);
+      run("UPDATE users SET notice=0,onboarded=1 WHERE id=?", u.id);
       run(
         "UPDATE event_types SET title='Tax strategy call',description='Let’s talk about your business, your goals, and opportunities to save on taxes.' WHERE user_id=?",
         u.id,
       );
       run(
-        "INSERT INTO event_types VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO event_types(id,user_id,title,slug,duration,description,location,color,active) VALUES(?,?,?,?,?,?,?,?,?)",
         randomUUID(),
         u.id,
         "Client check-in",
@@ -1516,7 +1702,7 @@ export function createApp(options = {}) {
         1,
       );
       run(
-        "INSERT INTO event_types VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO event_types(id,user_id,title,slug,duration,description,location,color,active) VALUES(?,?,?,?,?,?,?,?,?)",
         randomUUID(),
         u.id,
         "Planning session",
@@ -1554,11 +1740,9 @@ export function createApp(options = {}) {
     if (error.status)
       return res.status(error.status).json({ error: error.message });
     if (error.code?.startsWith("SQLITE_CONSTRAINT"))
-      return res
-        .status(409)
-        .json({
-          error: "This item already exists or conflicts with another record.",
-        });
+      return res.status(409).json({
+        error: "This item already exists or conflicts with another record.",
+      });
     console.error("Unhandled server error:", error.name, error.message);
     res.status(500).json({ error: "Something went wrong. Please try again." });
   });

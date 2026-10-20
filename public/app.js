@@ -126,8 +126,10 @@ const eventClass = (color) =>
     "#ec4899": "pink",
     "#3b82f6": "blue",
   })[color] || "";
+const avatar = (user, cls = "") =>
+  `<span class="avatar ${cls}">${user.photo ? `<img src="${e(user.photo)}" alt="${e(user.name)}’s profile photo">` : e(initials(user.name))}</span>`;
 const locationIcon = (location) =>
-  location === "Google Meet"
+  ["Google Meet", "Zoom"].includes(location)
     ? "video"
     : location === "Phone call"
       ? "phone"
@@ -258,11 +260,18 @@ function authView(kind = "login", message = "") {
       body: { token: params.get("token") },
     })
       .then((data) => {
-        if (location.pathname !== "/verify" || new URLSearchParams(location.search).get("token") !== params.get("token")) return;
+        if (
+          location.pathname !== "/verify" ||
+          new URLSearchParams(location.search).get("token") !==
+            params.get("token")
+        )
+          return;
         if (data.alreadyVerified) {
           $(".auth-form > h2").textContent = "Email verified";
-          $(".auth-form > p").textContent = "Your account is ready. Sign in to continue.";
-          $("#verify-result").innerHTML = '<div class="form-success">This email has already been verified.</div><a href="/login" data-nav class="btn full">Continue to sign in</a>';
+          $(".auth-form > p").textContent =
+            "Your account is ready. Sign in to continue.";
+          $("#verify-result").innerHTML =
+            '<div class="form-success">This email has already been verified.</div><a href="/login" data-nav class="btn full">Continue to sign in</a>';
           return;
         }
         state.user = data.user;
@@ -270,14 +279,23 @@ function authView(kind = "login", message = "") {
       })
       .catch((err) => {
         const result = $("#verify-result");
-        if (!result || new URLSearchParams(location.search).get("token") !== params.get("token")) return;
-        result.innerHTML = errorBox(err.message) +
+        if (
+          !result ||
+          new URLSearchParams(location.search).get("token") !==
+            params.get("token")
+        )
+          return;
+        result.innerHTML =
+          errorBox(err.message) +
           `<p class="small muted">Already verified? <a href="/login" data-nav>Sign in</a>. Otherwise, request a fresh verification email below.</p><form id="verification-resend"><div class="form-group"><label for="verification-email">Work email</label><input id="verification-email" name="email" type="email" autocomplete="email" required></div><button type="submit" class="btn full">Send a new verification link</button></form>`;
-        $("#verification-resend").onsubmit = event => {
+        $("#verification-resend").onsubmit = (event) => {
           event.preventDefault();
           const form = event.currentTarget;
           submit(form, async () => {
-            const data = await api("/api/auth/resend-verification", { method: "POST", body: { email: new FormData(form).get("email") } });
+            const data = await api("/api/auth/resend-verification", {
+              method: "POST",
+              body: { email: new FormData(form).get("email") },
+            });
             form.innerHTML = `<div class="form-success">${e(data.message)}</div><a href="/login" data-nav>Back to sign in</a>`;
           });
         };
@@ -315,7 +333,7 @@ function shell(page, body) {
       ["team", "users", "Team", "/app/team"],
     ];
   $("#app").innerHTML =
-    `<aside class="sidebar">${brand()}<span class="workspace-label">WORKSPACE</span><nav class="nav" aria-label="Main navigation">${nav.map(([key, i, label, url]) => `<a href="${url}" data-nav class="${page === key ? "active" : ""}" ${page === key ? 'aria-current="page"' : ""}>${icon(i)}${label}${key === "events" ? `<span class="nav-count">${state.events.filter((v) => v.active).length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="tip-card">${icon("bulb")}<h3>Your time, well spent.</h3><p>Share your booking link and let your calendar do the coordinating.</p><a href="/book/${e(u.slug)}" target="_blank" rel="noopener">View your booking page ↗</a></div><nav class="nav"><a href="/app/settings" data-nav class="${page === "settings" ? "active" : ""}">${icon("settings")}Settings</a></nav><div class="user-card"><span class="avatar">${e(initials(u.name))}</span><div><strong>${e(u.name)}</strong><small>${u.role === "admin" ? "Workspace admin" : "Team member"}</small></div><button class="btn ghost" data-action="logout" title="Sign out" aria-label="Sign out">${icon("logout")}</button></div></div></aside><div class="shell"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="mobile-menu" aria-label="Toggle menu">${icon("menu")}</button><span>Workspace</span>${icon("right")}<b>${nav.find((n) => n[0] === page)?.[2] || "Settings"}</b></div><div class="top-actions"><span class="calendar-status small muted">${u.googleConnected ? '<span class="status-dot"></span>Calendar connected' : "Calendar not connected"}</span><a class="btn secondary" href="/book/${e(u.slug)}" target="_blank" rel="noopener">${icon("external")}Booking page</a><span class="avatar purple">${e(initials(u.name))}</span></div></header><main class="content">${state.config.demo ? `<div class="notice demo">${icon("bulb")}<span>Demo workspace · Appointments stay local. Google Calendar and email delivery are not connected.</span></div>` : !u.googleConnected ? `<div class="notice">${icon("calendar")}<span>Connect Google Calendar to open your booking page and prevent scheduling conflicts.</span><a class="btn secondary" href="/app/settings" data-nav>Connect calendar ${icon("arrow")}</a></div>` : ""}${state.pendingEmails ? `<div class="notice error">${icon("mail")} ${state.pendingEmails} email${state.pendingEmails === 1 ? " is" : "s are"} waiting for delivery. Check Resend settings; delivery retries automatically.</div>` : ""}${state.pendingBookings ? `<div class="notice error">${icon("calendar")}<span>${state.pendingBookings} calendar request(s) need confirmation. <a href="/app/bookings?filter=all" data-nav>Open all appointments</a>, select the pending request, and check its calendar status.</span></div>` : ""}${body}<footer class="footer"><span>© ${new Date().getFullYear()} BMT Calendar. A little less busywork.</span><span>${icon("shield")} Your schedule is in good hands.</span></footer></main></div>`;
+    `<aside class="sidebar">${brand()}<span class="workspace-label">WORKSPACE</span><nav class="nav" aria-label="Main navigation">${nav.map(([key, i, label, url]) => `<a href="${url}" data-nav class="${page === key ? "active" : ""}" ${page === key ? 'aria-current="page"' : ""}>${icon(i)}${label}${key === "events" ? `<span class="nav-count">${state.events.filter((v) => v.active).length}</span>` : ""}</a>`).join("")}</nav><div class="sidebar-bottom"><div class="tip-card">${icon("bulb")}<h3>Your time, well spent.</h3><p>Share your booking link and let your calendar do the coordinating.</p><a href="/book/${e(u.slug)}" target="_blank" rel="noopener">View your booking page ↗</a></div><nav class="nav"><a href="/app/settings" data-nav class="${page === "settings" ? "active" : ""}">${icon("settings")}Settings</a></nav><div class="user-card">${avatar(u)}<div><strong>${e(u.name)}</strong><small>${u.role === "admin" ? "Workspace admin" : "Team member"}</small></div><button class="btn ghost" data-action="logout" title="Sign out" aria-label="Sign out">${icon("logout")}</button></div></div></aside><div class="shell"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="mobile-menu" aria-label="Toggle menu">${icon("menu")}</button><span>Workspace</span>${icon("right")}<b>${nav.find((n) => n[0] === page)?.[2] || "Settings"}</b></div><div class="top-actions"><span class="calendar-status small muted">${u.googleConnected ? '<span class="status-dot"></span>Calendar connected' : "Calendar not connected"}</span><a class="btn secondary" href="/book/${e(u.slug)}" target="_blank" rel="noopener">${icon("external")}Booking page</a>${avatar(u, "purple")}</div></header><main class="content">${state.config.demo ? `<div class="notice demo">${icon("bulb")}<span>Demo workspace · Appointments stay local. Google Calendar and email delivery are not connected.</span></div>` : !u.googleConnected ? `<div class="notice">${icon("calendar")}<span>Connect Google Calendar to open your booking page and prevent scheduling conflicts.</span><a class="btn secondary" href="/app/settings" data-nav>Connect calendar ${icon("arrow")}</a></div>` : ""}${state.pendingEmails ? `<div class="notice error">${icon("mail")} ${state.pendingEmails} email${state.pendingEmails === 1 ? " is" : "s are"} waiting for delivery. Check Resend settings; delivery retries automatically.</div>` : ""}${state.pendingBookings ? `<div class="notice error">${icon("calendar")}<span>${state.pendingBookings} calendar request(s) need confirmation. <a href="/app/bookings?filter=all" data-nav>Open all appointments</a>, select the pending request, and check its calendar status.</span></div>` : ""}${body}<footer class="footer"><span>© ${new Date().getFullYear()} BMT Calendar. A little less busywork.</span><span>${icon("shield")} Your schedule is in good hands.</span></footer></main></div>`;
 }
 function heading(title, sub, actions = "") {
   return `<div class="page-heading"><div><h1>${e(title)}</h1><p>${e(sub)}</p></div>${actions ? `<div class="heading-actions">${actions}</div>` : ""}</div>`;
@@ -620,8 +638,45 @@ function teamView() {
         ? `<button class="btn" data-action="invite">${icon("plus")}Invite teammate</button>`
         : "",
     ) +
-      `<section class="team-grid">${state.team.map((u) => `<article class="team-card"><span class="avatar purple">${e(initials(u.name))}</span><h3>${e(u.name)}${u.id === state.user.id ? ' <span class="small muted">(you)</span>' : ""}</h3><p>${e(u.email || "Team member")}</p><div><span class="pill">${u.role === "admin" ? "Workspace admin" : "Team member"}</span></div>${u.googleConnected === false ? '<p class="small muted">Calendar connection pending</p>' : ""}<a href="/book/${e(u.slug)}" target="_blank" rel="noopener" class="btn secondary">${icon("external")}Booking page</a></article>`).join("")}</section>`,
+      `<section class="team-grid">${state.team.map((u) => `<article class="team-card">${avatar(u, "purple")}<h3>${e(u.name)}${u.id === state.user.id ? ' <span class="small muted">(you)</span>' : ""}</h3><p>${e(u.email || "Team member")}</p><div><span class="pill">${u.role === "admin" ? "Workspace admin" : "Team member"}</span></div>${u.googleConnected === false ? '<p class="small muted">Calendar connection pending</p>' : ""}<a href="/book/${e(u.slug)}" target="_blank" rel="noopener" class="btn secondary">${icon("external")}Booking page</a></article>`).join("")}</section>`,
   );
+}
+function photoEditor(user) {
+  return `<div class="photo-editor"><div class="photo-preview">${avatar(user, "purple")}</div><form id="photo-form"><div class="form-group"><label for="profile-photo">Profile picture <span class="muted">(optional)</span></label><input id="profile-photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp"><small>JPG, PNG, or WebP, up to 2 MB. Your photo appears on your booking page and team profile.</small></div><button type="submit" class="btn secondary">Save photo</button>${user.photo ? '<button type="button" class="btn ghost" data-action="remove-photo">Remove photo</button>' : ""}</form></div>`;
+}
+function bindPhotoForm() {
+  $("#photo-form").onsubmit = (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    submit(form, async () => {
+      const file = $("#profile-photo").files[0];
+      if (!file) throw new Error("Choose a photo first.");
+      if (
+        !["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
+        file.size > 2 * 1024 * 1024
+      )
+        throw new Error("Choose a JPG, PNG, or WebP photo smaller than 2 MB.");
+      const image = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () =>
+          reject(new Error("This photo could not be read. Try another file."));
+        reader.readAsDataURL(file);
+      });
+      state.user = (
+        await api("/api/me/photo", { method: "PUT", body: { image } })
+      ).user;
+      toast("Profile photo saved.");
+      await renderRoute();
+    });
+  };
+}
+function onboardingView() {
+  const user = state.user;
+  publicFrame(
+    `<section class="setup-card panel"><div class="setup-heading"><span class="eyebrow">WELCOME TO YOUR CALENDAR</span><h1>Make it yours</h1><p class="muted">Hi ${e(user.name.split(" ")[0])}, let’s get your profile and calendar ready.</p></div><div class="setup-step"><span class="step-number">1</span><div><h2>Add a familiar face</h2><p class="small muted">Help clients recognize who they’re meeting. You can add or change this later.</p>${photoEditor(user)}</div></div><div class="setup-step"><span class="step-number">2</span><div><h2>Connect Google Calendar</h2><p class="small muted">Check your availability and automatically add appointments to your calendar. Zoom appointments also use Google Calendar to prevent double bookings.</p>${user.googleConnected ? `<div class="form-success">${icon("check")} Connected to ${e(user.googleEmail || "Google Calendar")}</div>` : `<a class="btn secondary" href="/api/google/connect"><span class="google-logo small-google">G</span>Connect Google Calendar</a>`}${new URLSearchParams(location.search).get("google") === "denied" ? '<div class="form-error">The connection was cancelled. Please connect your calendar to finish setup.</div>' : ""}</div></div><div class="setup-footer"><button class="btn" data-action="finish-setup" ${user.googleConnected ? "" : "disabled"}>Continue to workspace ${icon("arrow")}</button><button class="btn ghost" data-action="logout">Sign out</button><p class="small muted">${user.googleConnected ? "You’re ready to set availability and share your first booking link." : "Connect your calendar to continue. Your profile picture can be added later."}</p></div></section>`,
+  );
+  bindPhotoForm();
 }
 function settingsView() {
   const u = state.user;
@@ -631,8 +686,9 @@ function settingsView() {
       "Make yourself at home",
       "Manage your profile and calendar connections.",
     ) +
-      `<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>Your profile</h2></div><div class="panel-body"><form id="profile-form"><div class="form-group"><label for="profile-name">Full name</label><input id="profile-name" name="name" value="${e(u.name)}" required minlength="2" maxlength="80"></div><div class="form-group"><label for="profile-email">Email address</label><input id="profile-email" value="${e(u.email)}" type="email" disabled><small>Your verified email identifies your team account.</small></div><div class="form-group"><label for="profile-zone">Time zone</label><select name="timezone" id="profile-zone">${zoneOptions(u.timezone)}</select></div><div class="form-group"><label for="profile-link">Your booking page</label><input id="profile-link" value="${e(state.baseUrl + "/book/" + u.slug)}" readonly></div><button class="btn" type="submit">Save changes</button></form></div></section><div class="side-stack"><section class="panel"><div class="panel-head"><h2>Calendar connections</h2></div><div class="panel-body"><div class="connection"><span class="google-logo">G</span><div><h3>Google Calendar</h3><p>${u.googleConnected ? e(u.googleEmail) : "Keep availability in sync and add bookings to your primary calendar."}</p>${u.googleConnected ? `<span class="pill">Connected</span> <a class="btn secondary" href="/api/google/connect">Reconnect</a> <button class="btn ghost" data-action="disconnect">Disconnect</button>` : `<a href="/api/google/connect" class="btn secondary">Connect Google Calendar</a>`}</div></div>${!state.config.googleConfigured ? '<p class="small muted">The administrator needs to configure Google OAuth credentials before calendars can connect.</p>' : ""}</div></section><section class="panel"><div class="panel-head"><h2>Account security</h2>${icon("shield")}</div><div class="panel-body"><p class="small muted">We’ll send a secure link to your verified email address.</p><button class="btn secondary" data-action="password-reset">Reset my password</button></div></section></div></div>`,
+      `<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>Your profile</h2></div><div class="panel-body">${photoEditor(u)}<form id="profile-form"><div class="form-group"><label for="profile-name">Full name</label><input id="profile-name" name="name" value="${e(u.name)}" required minlength="2" maxlength="80"></div><div class="form-group"><label for="profile-email">Email address</label><input id="profile-email" value="${e(u.email)}" type="email" disabled><small>Your verified email identifies your team account.</small></div><div class="form-group"><label for="profile-zone">Time zone</label><select name="timezone" id="profile-zone">${zoneOptions(u.timezone)}</select></div><div class="form-group"><label for="profile-link">Your booking page</label><input id="profile-link" value="${e(state.baseUrl + "/book/" + u.slug)}" readonly></div><button class="btn" type="submit">Save changes</button></form></div></section><div class="side-stack"><section class="panel"><div class="panel-head"><h2>Calendar connections</h2></div><div class="panel-body"><div class="connection"><span class="google-logo">G</span><div><h3>Google Calendar</h3><p>${u.googleConnected ? e(u.googleEmail) : "Keep availability in sync and add bookings to your primary calendar."}</p>${u.googleConnected ? `<span class="pill">Connected</span> <a class="btn secondary" href="/api/google/connect">Reconnect</a> <button class="btn secondary" data-action="check-calendar">Check connection</button> <button class="btn ghost" data-action="disconnect">Disconnect</button>` : `<a href="/api/google/connect" class="btn secondary">Connect Google Calendar</a>`}</div></div><div id="calendar-health" aria-live="polite"></div>${!state.config.googleConfigured ? '<p class="small muted">The administrator needs to configure Google OAuth credentials before calendars can connect.</p>' : ""}</div></section><section class="panel"><div class="panel-head"><h2>Account security</h2>${icon("shield")}</div><div class="panel-body"><p class="small muted">We’ll send a secure link to your verified email address.</p><button class="btn secondary" data-action="password-reset">Reset my password</button></div></section></div></div>`,
   );
+  bindPhotoForm();
   $("#profile-form").onsubmit = (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -666,7 +722,7 @@ function eventModal(id) {
   };
   modal(
     id ? "Edit event type" : "Create an event type",
-    `<form id="event-form"><div class="form-group"><label for="event-title">What’s the occasion?</label><input name="title" id="event-title" value="${e(v.title)}" placeholder="e.g. Tax strategy call" required minlength="2" maxlength="80"></div><div class="form-row"><div class="form-group"><label for="event-duration">Duration</label><select id="event-duration" name="duration">${[15, 30, 45, 60, 75, 90, 120, 150, 180, 240].map((n) => `<option value="${n}" ${n === v.duration ? "selected" : ""}>${n} minutes</option>`).join("")}</select></div><div class="form-group"><label for="event-location">Where</label><select id="event-location" name="location">${["Google Meet", "Phone call", "In person"].map((l) => `<option ${l === v.location ? "selected" : ""}>${l}</option>`).join("")}</select></div></div><div class="form-group"><label for="event-description">A little about this meeting</label><textarea name="description" id="event-description" placeholder="Let guests know what to expect…" maxlength="2000">${e(v.description)}</textarea></div><div class="form-group"><label>Event color</label><div class="color-options">${[
+    `<form id="event-form"><div class="form-group"><label for="event-title">What’s the occasion?</label><input name="title" id="event-title" value="${e(v.title)}" placeholder="e.g. Tax strategy call" required minlength="2" maxlength="80"></div><div class="form-row"><div class="form-group"><label for="event-duration">Duration</label><select id="event-duration" name="duration">${[15, 30, 45, 60, 75, 90, 120, 150, 180, 240].map((n) => `<option value="${n}" ${n === v.duration ? "selected" : ""}>${n} minutes</option>`).join("")}</select></div><div class="form-group"><label for="event-location">Where</label><select id="event-location" name="location">${["Google Meet", "Zoom", "Phone call", "In person"].map((l) => `<option ${l === v.location ? "selected" : ""}>${l}</option>`).join("")}</select></div></div><div id="zoom-link-field" class="form-group" ${v.location === "Zoom" ? "" : "hidden"}><label for="event-zoom-link">Zoom meeting link</label><input type="url" id="event-zoom-link" name="meetingUrl" value="${e(v.meeting_url || "")}" placeholder="https://us02web.zoom.us/j/1234567890" ${v.location === "Zoom" ? "required" : "disabled"}><small>Paste an existing Zoom meeting link. It will be included in calendar invitations and confirmation emails. A new Zoom room is not created automatically.</small></div><div class="form-group"><label for="event-description">A little about this meeting</label><textarea name="description" id="event-description" placeholder="Let guests know what to expect…" maxlength="2000">${e(v.description)}</textarea></div><div class="form-group"><label>Event color</label><div class="color-options">${[
       ["#6366f1", "purple"],
       ["#10b981", "green"],
       ["#f59e0b", "amber"],
@@ -681,6 +737,12 @@ function eventModal(id) {
         "",
       )}</div></div><div class="form-group"><label><input type="checkbox" name="active" ${v.active ? "checked" : ""}> Available for booking</label><small>Uncheck to pause new bookings. Existing appointments stay on your calendar.</small></div><div class="dialog-foot"><button type="button" class="btn secondary" data-action="close-modal">Cancel</button><button type="submit" class="btn">${id ? "Save changes" : "Create event type"}</button></div></form>`,
   );
+  $("#event-location").onchange = (event) => {
+    const zoom = event.target.value === "Zoom";
+    $("#zoom-link-field").hidden = !zoom;
+    $("#event-zoom-link").required = zoom;
+    $("#event-zoom-link").disabled = !zoom;
+  };
   $("#event-form").onsubmit = (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -693,6 +755,7 @@ function eventModal(id) {
           duration: Number(f.get("duration")),
           description: f.get("description"),
           location: f.get("location"),
+          meetingUrl: f.get("meetingUrl") || "",
           color: f.get("color"),
           active: f.has("active"),
         },
@@ -717,12 +780,12 @@ function publicFrame(body) {
 }
 function publicInfo() {
   const p = state.public;
-  return `<aside class="booking-info"><span class="avatar purple">${e(initials(p.host.name))}</span><div class="muted">${e(p.host.name)}</div><h1>${e(p.event.title)}</h1><div class="booking-detail">${icon("clock")}${p.event.duration} minutes</div><div class="booking-detail">${icon(locationIcon(p.event.location))}${e(p.event.location)}</div>${p.start ? `<div class="booking-detail">${icon("calendar")}${publicFmt(p.start, { weekday: "short", month: "short", day: "numeric" })}</div><div class="booking-detail">${icon("clock")}${publicFmt(p.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</div>` : ""}<p>${e(p.event.description)}</p></aside>`;
+  return `<aside class="booking-info">${avatar(p.host, "purple")}<div class="muted">${e(p.host.name)}</div><h1>${e(p.event.title)}</h1><div class="booking-detail">${icon("clock")}${p.event.duration} minutes</div><div class="booking-detail">${icon(locationIcon(p.event.location))}${e(p.event.location)}</div>${p.start ? `<div class="booking-detail">${icon("calendar")}${publicFmt(p.start, { weekday: "short", month: "short", day: "numeric" })}</div><div class="booking-detail">${icon("clock")}${publicFmt(p.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</div>` : ""}<p>${e(p.event.description)}</p></aside>`;
 }
 async function hostPage(host) {
   const data = await api(`/api/public/${encodeURIComponent(host)}`);
   publicFrame(
-    `<section class="public-event-list"><div class="public-host"><span class="avatar purple">${e(initials(data.host.name))}</span><h1>A little time with ${e(data.host.name.split(" ")[0])}</h1><p>Choose a meeting below. Let’s find a time that works for you.</p></div><div class="event-grid">${data.events.map((v) => `<article class="event-card ${eventClass(v.color)}"><span class="event-symbol">${icon(locationIcon(v.location))}</span><h3>${e(v.title)}</h3><p>${e(v.description)}</p><div class="event-meta"><span>${icon("clock")}${v.duration} minutes</span><span>${icon(locationIcon(v.location))}${e(v.location)}</span></div><div class="event-bottom"><a href="/book/${e(host)}/${e(v.slug)}" data-nav>Find a time ${icon("arrow")}</a></div></article>`).join("") || empty("No meetings available", "This host has not opened any event types for booking.")}</div></section>`,
+    `<section class="public-event-list"><div class="public-host">${avatar(data.host, "purple")}<h1>A little time with ${e(data.host.name.split(" ")[0])}</h1><p>Choose a meeting below. Let’s find a time that works for you.</p></div><div class="event-grid">${data.events.map((v) => `<article class="event-card ${eventClass(v.color)}"><span class="event-symbol">${icon(locationIcon(v.location))}</span><h3>${e(v.title)}</h3><p>${e(v.description)}</p><div class="event-meta"><span>${icon("clock")}${v.duration} minutes</span><span>${icon(locationIcon(v.location))}${e(v.location)}</span></div><div class="event-bottom"><a href="/book/${e(host)}/${e(v.slug)}" data-nav>Find a time ${icon("arrow")}</a></div></article>`).join("") || empty("No meetings available", "This host has not opened any event types for booking.")}</div></section>`,
   );
 }
 async function publicBooking(host, slug, manage = null) {
@@ -820,7 +883,7 @@ function bookingConfirmation(rescheduled = false) {
   const p = state.public,
     b = p.booking;
   publicFrame(
-    `<section class="booking-card">${publicInfo()}<div class="booking-main"><div class="confirmation"><span class="success-icon">${icon("check")}</span><h2>${rescheduled ? "A fresh time, all set." : "You’re on the calendar."}</h2><p>${rescheduled ? "Your appointment has been updated." : "Your appointment is confirmed."} ${state.config.demo ? "This is a local demo booking." : "Look out for a confirmation in your inbox."}</p><div class="confirmation-summary"><h3>${e(b.title)}</h3><p class="booking-detail">${icon("calendar")}${publicFmt(b.start, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p><p class="booking-detail">${icon("clock")}${publicFmt(b.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</p><p class="booking-detail">${icon("users")}${e(p.host.name)}</p><p class="booking-detail">${icon(locationIcon(b.location))}${e(b.location)}</p></div><div class="confirmation-actions"><a href="${e(p.manageUrl)}" class="btn secondary" data-nav>Manage appointment</a>${b.meet_url ? `<a class="btn" href="${e(b.meet_url)}" target="_blank" rel="noopener">Join Google Meet</a>` : ""}</div><p class="auth-note muted">Keep your management link private. It lets you reschedule or cancel.</p></div></div></section>`,
+    `<section class="booking-card">${publicInfo()}<div class="booking-main"><div class="confirmation"><span class="success-icon">${icon("check")}</span><h2>${rescheduled ? "A fresh time, all set." : "You’re on the calendar."}</h2><p>${rescheduled ? "Your appointment has been updated." : "Your appointment is confirmed."} ${state.config.demo ? "This is a local demo booking." : "Look out for a confirmation in your inbox."}</p><div class="confirmation-summary"><h3>${e(b.title)}</h3><p class="booking-detail">${icon("calendar")}${publicFmt(b.start, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p><p class="booking-detail">${icon("clock")}${publicFmt(b.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</p><p class="booking-detail">${icon("users")}${e(p.host.name)}</p><p class="booking-detail">${icon(locationIcon(b.location))}${e(b.location)}</p></div><div class="confirmation-actions"><a href="${e(p.manageUrl)}" class="btn secondary" data-nav>Manage appointment</a>${b.meet_url ? `<a class="btn" href="${e(b.meet_url)}" target="_blank" rel="noopener">Join ${b.location === "Zoom" ? "Zoom" : "Google Meet"}</a>` : ""}</div><p class="auth-note muted">Keep your management link private. It lets you reschedule or cancel.</p></div></div></section>`,
   );
 }
 async function manageView(value) {
@@ -869,6 +932,11 @@ async function renderRoute() {
     state.baseUrl = me.baseUrl;
     state.pendingEmails = me.pendingEmails;
     state.pendingBookings = me.pendingBookings;
+    if (path === "/app/setup" || !state.user.onboardingComplete) {
+      if (path !== "/app/setup") history.replaceState({}, "", "/app/setup");
+      onboardingView();
+      return;
+    }
     const [events, bookings, team] = await Promise.all([
       api("/api/events"),
       api("/api/bookings"),
@@ -922,13 +990,43 @@ async function renderRoute() {
   }
 }
 const actions = {
-  "toggle-password": button => {
+  "check-calendar": async (button) => {
+    button.disabled = true;
+    const output = $("#calendar-health");
+    if (output)
+      output.innerHTML = '<p class="small muted">Checking Google Calendar…</p>';
+    try {
+      const result = await api("/api/google/status");
+      if (output?.isConnected)
+        output.innerHTML = `<div class="${result.healthy ? "form-success" : "form-error"}">${e(result.message)}${result.code === "API_DISABLED" ? '<p><a href="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com" target="_blank" rel="noopener">Open Google Calendar API in Google Cloud</a></p>' : ""}</div>`;
+    } finally {
+      if (button.isConnected) button.disabled = false;
+    }
+  },
+  "finish-setup": async () => {
+    state.user = (
+      await api("/api/me/onboarding", { method: "POST", body: {} })
+    ).user;
+    navigate("/app");
+  },
+  "remove-photo": async () => {
+    state.user = (
+      await api("/api/me/photo", { method: "DELETE", body: {} })
+    ).user;
+    toast("Profile photo removed.");
+    await renderRoute();
+  },
+  "toggle-password": (button) => {
     const input = document.getElementById(button.getAttribute("aria-controls"));
     const reveal = input.type === "password";
-    const start = input.selectionStart, end = input.selectionEnd;
+    const start = input.selectionStart,
+      end = input.selectionEnd;
     input.type = reveal ? "text" : "password";
     button.textContent = reveal ? "Hide" : "Show";
-    button.setAttribute("aria-label", reveal ? "Hide password" : "Show password");
+    button.setAttribute(
+      "aria-label",
+      reveal ? "Hide password" : "Show password",
+    );
     button.setAttribute("aria-pressed", String(reveal));
     input.focus();
     if (start !== null && end !== null) input.setSelectionRange(start, end);

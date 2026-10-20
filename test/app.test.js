@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 import supertest from "supertest";
 import { DateTime } from "luxon";
 import { createApp } from "../server.js";
+import sharp from "sharp";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const password = "A rather strong password 123!";
 async function setup(t, overrides = {}) {
@@ -100,14 +105,25 @@ test("verified owner account, secure session cookie, single-use verification and
   assert.equal(me.body.user.role, "admin");
   assert.equal(me.body.user.password, undefined);
   await s.anon.get("/api/me").expect(401);
-  const replay = await s.anon.post("/api/auth/verify").send({ token: s.verify }).expect(200);
+  const replay = await s.anon
+    .post("/api/auth/verify")
+    .send({ token: s.verify })
+    .expect(200);
   assert.deepEqual(replay.body, { alreadyVerified: true });
   assert.equal(replay.headers["set-cookie"], undefined);
   const untouchedBrowser = supertest.agent(s.app);
-  await untouchedBrowser.post("/api/auth/verify").send({ token: s.verify }).expect(200);
+  await untouchedBrowser
+    .post("/api/auth/verify")
+    .send({ token: s.verify })
+    .expect(200);
   await untouchedBrowser.get("/api/me").expect(401);
-  await s.anon.post("/api/auth/verify").send({ token: "invalid-token" }).expect(400);
-  s.db.prepare("UPDATE tokens SET expires=? WHERE kind='verify'").run(Date.now() - 1);
+  await s.anon
+    .post("/api/auth/verify")
+    .send({ token: "invalid-token" })
+    .expect(400);
+  s.db
+    .prepare("UPDATE tokens SET expires=? WHERE kind='verify'")
+    .run(Date.now() - 1);
   await s.anon.post("/api/auth/verify").send({ token: s.verify }).expect(400);
   await s.anon
     .post("/api/auth/login")
@@ -634,17 +650,37 @@ test("an ambiguous rescheduling request can be reconciled without duplicating th
 });
 
 test("Render production startup uses its assigned URL and retained generated secret", async () => {
-  const names = ["APP_URL", "RENDER_EXTERNAL_URL", "TOKEN_ENCRYPTION_KEY", "TOKEN_ENCRYPTION_SECRET"];
-  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  const names = [
+    "APP_URL",
+    "RENDER_EXTERNAL_URL",
+    "TOKEN_ENCRYPTION_KEY",
+    "TOKEN_ENCRYPTION_SECRET",
+  ];
+  const previous = Object.fromEntries(
+    names.map((name) => [name, process.env[name]]),
+  );
   let service;
   try {
     delete process.env.APP_URL;
     delete process.env.TOKEN_ENCRYPTION_KEY;
     process.env.RENDER_EXTERNAL_URL = "https://assigned-calendar.onrender.com";
-    process.env.TOKEN_ENCRYPTION_SECRET = "test-generated-secret-with-at-least-32-characters";
-    const settings = { dbPath: ":memory:", production: true, demo: false, ownerEmail: "owner@example.com", resendKey: "test-only", mailFrom: "test@example.com", googleId: "test-id", googleSecret: "test-secret" };
+    process.env.TOKEN_ENCRYPTION_SECRET =
+      "test-generated-secret-with-at-least-32-characters";
+    const settings = {
+      dbPath: ":memory:",
+      production: true,
+      demo: false,
+      ownerEmail: "owner@example.com",
+      resendKey: "test-only",
+      mailFrom: "test@example.com",
+      googleId: "test-id",
+      googleSecret: "test-secret",
+    };
     service = createApp(settings);
-    assert.equal(service.config.baseUrl, "https://assigned-calendar.onrender.com");
+    assert.equal(
+      service.config.baseUrl,
+      "https://assigned-calendar.onrender.com",
+    );
     assert.match(service.config.encryptionKey, /^[a-f0-9]{64}$/);
     const stableKey = service.config.encryptionKey;
     await supertest(service.app).get("/api/health").expect(200);
@@ -664,5 +700,266 @@ test("Render production startup uses its assigned URL and retained generated sec
       if (previous[name] === undefined) delete process.env[name];
       else process.env[name] = previous[name];
     }
+  }
+});
+
+test("profile photos are sanitized, resized, published and removable", async (t) => {
+  const s = await setup(t);
+  const png = await sharp({
+    create: { width: 120, height: 80, channels: 3, background: "#6558df" },
+  })
+    .png()
+    .toBuffer();
+  const image = "data:image/png;base64," + png.toString("base64");
+  await s.anon.put("/api/me/photo").send({ image }).expect(401);
+  await s.agent
+    .put("/api/me/photo")
+    .send({ image: "data:image/svg+xml;base64,PHN2Zz4=" })
+    .expect(400);
+  await s.agent
+    .put("/api/me/photo")
+    .send({ image: "data:image/png;base64,YmFk" })
+    .expect(400);
+  const saved = await s.agent.put("/api/me/photo").send({ image }).expect(200);
+  assert.match(saved.body.user.photo, /^data:image\/jpeg;base64,/);
+  const metadata = await sharp(
+    Buffer.from(saved.body.user.photo.split(",")[1], "base64"),
+  ).metadata();
+  assert.equal(metadata.width, 256);
+  assert.equal(metadata.height, 256);
+  assert.equal(metadata.exif, undefined);
+  const page = await s.anon.get(s.path).expect(200);
+  assert.equal(page.body.host.photo, saved.body.user.photo);
+  const deleted = await s.agent.delete("/api/me/photo").send({}).expect(200);
+  assert.equal(deleted.body.user.photo, null);
+});
+
+test("new accounts finish onboarding only after a working calendar connection", async (t) => {
+  const s = await setup(t);
+  assert.equal(
+    (await s.agent.get("/api/me")).body.user.onboardingComplete,
+    false,
+  );
+  await s.agent.post("/api/me/onboarding").send({}).expect(409);
+  s.db
+    .prepare("UPDATE users SET google_refresh=? WHERE id=?")
+    .run("test-calendar-binding", s.user.id);
+  const saved = await s.agent.post("/api/me/onboarding").send({}).expect(200);
+  assert.equal(saved.body.user.onboardingComplete, true);
+  assert.equal(saved.body.user.photo, null, "A photo remains optional");
+  assert.equal(
+    (await s.agent.get("/api/me")).body.user.onboardingComplete,
+    true,
+  );
+});
+
+test("Zoom links are validated, included only after booking and retained on rescheduling", async (t) => {
+  const s = await setup(t);
+  const zoom = "https://us02web.zoom.us/j/1234567890?pwd=meeting-passcode";
+  const input = {
+    title: "Zoom strategy call",
+    duration: 30,
+    location: "Zoom",
+    meetingUrl: zoom,
+    color: "#6366f1",
+    active: true,
+  };
+  for (const meetingUrl of [
+    "",
+    "javascript:alert(1)",
+    "https://zoom.us.evil.example/j/123456",
+    "https://zoom.us/signin",
+  ]) {
+    await s.agent
+      .post("/api/events")
+      .send({ ...input, meetingUrl })
+      .expect(400);
+  }
+  const event = (await s.agent.post("/api/events").send(input).expect(201)).body
+    .event;
+  assert.equal(event.meeting_url, zoom);
+  const path = `/api/public/${s.user.slug}/${event.slug}`;
+  const page = await s.anon.get(path).expect(200);
+  assert.equal(page.body.event.meeting_url, undefined);
+  assert.equal(page.body.event.meetingUrl, undefined);
+  const result = await s.anon
+    .post(path + "/bookings")
+    .send(guest(s.slots[0]))
+    .expect(201);
+  assert.equal(result.body.booking.location, "Zoom");
+  assert.equal(result.body.booking.meet_url, zoom);
+  const message = s.mail.find(
+    (m) => m.subject === "Confirmed: Zoom strategy call",
+  );
+  assert.ok(message.html.includes("Join Zoom"));
+  assert.ok(message.html.includes("us02web.zoom.us/j/1234567890"));
+  assert.ok(!message.html.includes("Join Google Meet"));
+  const manage = new URL(result.body.manageUrl).pathname.split("/").pop();
+  const rescheduled = await s.anon
+    .post(`/api/manage/${manage}/reschedule`)
+    .send({ start: s.slots[8], timezone: "America/New_York" })
+    .expect(200);
+  assert.equal(rescheduled.body.booking.meet_url, zoom);
+});
+
+async function connectGoogleWithResponses(s, t, responses) {
+  const connected = await s.agent.get("/api/google/connect").expect(302);
+  const state = new URL(connected.headers.location).searchParams.get("state");
+  t.mock.method(globalThis, "fetch", async (input, opts) => {
+    const url = String(input);
+    if (url === "https://oauth2.googleapis.com/token")
+      return Response.json({
+        access_token: "test-access",
+        refresh_token: "test-refresh",
+        scope:
+          "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.freebusy",
+      });
+    if (url === "https://openidconnect.googleapis.com/v1/userinfo")
+      return Response.json({
+        email: "calendar@example.com",
+        email_verified: true,
+      });
+    return responses(url, opts);
+  });
+  await s.agent
+    .get("/api/google/callback")
+    .query({ code: "test-code", state })
+    .expect(302);
+  s.config.calendarProvider = null;
+}
+
+test("disabled Google Calendar API is diagnosed and slots recover once it is enabled", async (t) => {
+  const s = await setup(t, {
+    googleId: "test-id",
+    googleSecret: "test-secret",
+    encryptionKey: "1".repeat(64),
+  });
+  let enabled = false;
+  await connectGoogleWithResponses(s, t, async (url) => {
+    assert.equal(url, "https://www.googleapis.com/calendar/v3/freeBusy");
+    return enabled
+      ? Response.json({ calendars: { primary: { busy: [] } } })
+      : Response.json(
+          { error: { code: 403, details: [{ reason: "SERVICE_DISABLED" }] } },
+          { status: 403 },
+        );
+  });
+  const failed = await s.anon
+    .get(s.path + "/slots")
+    .query({ date: s.day, timezone: "America/New_York" })
+    .expect(502);
+  assert.match(failed.body.error, /Google Calendar API is not enabled/);
+  assert.equal(
+    failed.body.slots,
+    undefined,
+    "Never publish unchecked availability after a Google failure",
+  );
+  const diagnostic = await s.agent.get("/api/google/status").expect(200);
+  assert.equal(diagnostic.body.code, "API_DISABLED");
+  await s.agent.post("/api/me/onboarding").send({}).expect(502);
+  assert.equal(
+    (await s.agent.get("/api/me")).body.user.onboardingComplete,
+    false,
+  );
+  enabled = true;
+  assert.equal((await s.agent.get("/api/google/status")).body.healthy, true);
+  assert.ok(
+    (
+      await s.anon
+        .get(s.path + "/slots")
+        .query({ date: s.day, timezone: "America/New_York" })
+        .expect(200)
+    ).body.slots.length > 0,
+  );
+  await s.agent.post("/api/me/onboarding").send({}).expect(200);
+});
+
+test("Zoom calendar invitations use the Zoom URL without creating Google Meet rooms", async (t) => {
+  const s = await setup(t, {
+    googleId: "test-id",
+    googleSecret: "test-secret",
+    encryptionKey: "1".repeat(64),
+  });
+  let calendarEvent;
+  await connectGoogleWithResponses(s, t, async (url, opts) => {
+    if (url.endsWith("/freeBusy"))
+      return Response.json({ calendars: { primary: { busy: [] } } });
+    assert.ok(url.includes("/calendars/primary/events?"));
+    calendarEvent = JSON.parse(opts.body);
+    return Response.json({ id: calendarEvent.id });
+  });
+  const zoom = "https://us02web.zoom.us/j/1234567890";
+  const event = (
+    await s.agent
+      .post("/api/events")
+      .send({
+        title: "Zoom planning",
+        duration: 30,
+        location: "Zoom",
+        meetingUrl: zoom,
+        color: "#6366f1",
+        active: true,
+      })
+      .expect(201)
+  ).body.event;
+  const result = await s.anon
+    .post(`/api/public/${s.user.slug}/${event.slug}/bookings`)
+    .send(guest(s.slots[0]))
+    .expect(201);
+  assert.equal(calendarEvent.location, zoom);
+  assert.equal(calendarEvent.conferenceData, undefined);
+  assert.equal(result.body.booking.meet_url, zoom);
+});
+
+test("upgrading a pre-profile database preserves existing users and event types", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bmt-legacy-"));
+  const dbPath = join(dir, "calendar.sqlite");
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, role TEXT NOT NULL DEFAULT 'member', verified INTEGER NOT NULL DEFAULT 0, timezone TEXT NOT NULL DEFAULT 'America/New_York', windows TEXT NOT NULL, notice INTEGER NOT NULL DEFAULT 240, horizon INTEGER NOT NULL DEFAULT 60, buffer INTEGER NOT NULL DEFAULT 15, google_refresh TEXT, google_email TEXT, created TEXT NOT NULL);
+    CREATE TABLE event_types (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL, slug TEXT NOT NULL, duration INTEGER NOT NULL, description TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT 'Google Meet', color TEXT NOT NULL DEFAULT '#6366f1', active INTEGER NOT NULL DEFAULT 1, UNIQUE(user_id,slug));`);
+  legacy
+    .prepare(
+      "INSERT INTO users(id,name,email,password,slug,verified,windows,created) VALUES(?,?,?,?,?,?,?,?)",
+    )
+    .run(
+      "legacy-user",
+      "Existing User",
+      "existing@example.com",
+      "historical-password-hash",
+      "existing-user",
+      1,
+      "[]",
+      "2026-01-01T00:00:00.000Z",
+    );
+  legacy
+    .prepare(
+      "INSERT INTO event_types(id,user_id,title,slug,duration) VALUES(?,?,?,?,?)",
+    )
+    .run(
+      "legacy-event",
+      "legacy-user",
+      "Existing meeting",
+      "existing-meeting",
+      30,
+    );
+  legacy.close();
+  let service;
+  try {
+    service = createApp({ dbPath, production: false, demo: false });
+    const user = service.db
+      .prepare("SELECT * FROM users WHERE id=?")
+      .get("legacy-user");
+    assert.equal(user.email, "existing@example.com");
+    assert.equal(user.password, "historical-password-hash");
+    assert.equal(user.onboarded, 1);
+    assert.equal(user.photo, null);
+    const event = service.db
+      .prepare("SELECT * FROM event_types WHERE id=?")
+      .get("legacy-event");
+    assert.equal(event.title, "Existing meeting");
+    assert.equal(event.meeting_url, "");
+  } finally {
+    service?.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

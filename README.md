@@ -4,8 +4,10 @@ Simple scheduling for the Boris M Tax team: individual booking pages, event type
 
 ## What is implemented
 
+- First-time setup after email verification guides staff through an optional profile photo and a working Google Calendar connection. Existing accounts retain dashboard access; photos can be updated in Settings. Images are decoded, cropped to 256×256, and re-encoded without original metadata.
 - Verified email/password accounts, secure cookies, password reset, invitation-only team registration, and an administrator account for `accounting@borismtax.com`.
 - A responsive dashboard, appointment search, team view, monthly calendar, and CSV export.
+- Zoom event types accept an existing HTTPS Zoom meeting link. Confirmations and Google Calendar invitations include that link; this app does not create new Zoom rooms or require Zoom API credentials.
 - Per-user appointment types, durations, descriptions, colors, and shareable links. Pausing an event type stops new bookings without cancelling existing ones.
 - Weekly working hours, IANA time zones, minimum notice, booking horizon, and buffers around appointments.
 - Public booking without a client account, confirmation emails, private management links, cancellation, and rescheduling.
@@ -118,3 +120,7 @@ npm run test:browser
 If Chromium is already installed, browser tests use `/usr/bin/chromium`, or set `CHROMIUM_PATH` to its executable. Browser screenshots are generated in `test-results/`. GitHub Actions runs the syntax checks, integration tests, and desktop/mobile browser workflows on every push and pull request.
 
 Integration tests exercise a real SQLite database with controlled Google/Resend responses. They cover accounts, invitations, password reset, authorization, booking races, time zones, availability, buffers, calendar failures/recovery, Google OAuth/refresh encryption, Resend transport, and cancellation/rescheduling. Browser tests exercise the real local server and UI in explicit demo mode. They do **not** establish that a real Google account is connected or a real Resend message has been delivered. Live end-to-end verification requires configured credentials, a deployed HTTPS origin, and an authorized team calendar.
+
+### Google Calendar availability errors
+
+In **Settings → Google Calendar → Check connection**, the app verifies the connected account’s availability access. If the Google Calendar API is disabled, enable **Google Calendar API** in the same Google Cloud project as the OAuth client. If permissions are denied, reconnect and approve both Calendar permissions. Do not change appointment durations or buffers to work around a provider failure: unchecked slots are never offered for booking.

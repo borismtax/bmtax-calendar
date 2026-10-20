@@ -3,6 +3,7 @@ import { createApp } from "../server.js";
 import assert from "node:assert/strict";
 import { mkdirSync, existsSync } from "node:fs";
 import { DateTime } from "luxon";
+import sharp from "sharp";
 
 const testMail = [];
 const service = createApp({
@@ -12,7 +13,7 @@ const service = createApp({
   production: false,
   testMode: true,
   ownerEmail: "owner@example.com",
-  deliverMail: async item => testMail.push(item),
+  deliverMail: async (item) => testMail.push(item),
 });
 const server = service.app.listen(3199, "127.0.0.1");
 const browser = await chromium.launch({
@@ -37,38 +38,124 @@ try {
     const passwordInput = page.locator("#password");
     await passwordInput.fill("A strong test password 123!");
     assert.equal(await passwordInput.getAttribute("type"), "password");
-    await page.getByRole("button", { name: "Show password", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Show password", exact: true })
+      .click();
     assert.equal(await passwordInput.getAttribute("type"), "text");
-    assert.equal(await passwordInput.inputValue(), "A strong test password 123!");
-    assert.equal(await page.getByRole("button", { name: "Hide password", exact: true }).getAttribute("aria-pressed"), "true");
-    await page.getByRole("button", { name: "Hide password", exact: true }).click();
+    assert.equal(
+      await passwordInput.inputValue(),
+      "A strong test password 123!",
+    );
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Hide password", exact: true })
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    await page
+      .getByRole("button", { name: "Hide password", exact: true })
+      .click();
     assert.equal(await passwordInput.getAttribute("type"), "password");
   }
   completed++;
-  console.log("PASS browser: show/hide password on sign-in, registration and reset");
+  console.log(
+    "PASS browser: show/hide password on sign-in, registration and reset",
+  );
   await page.goto("http://localhost:3199/signup");
   await page.getByLabel("Full name").fill("Account Owner");
   await page.getByLabel("Work email").fill("owner@example.com");
   await page.locator("#password").fill("A strong test password 123!");
-  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Create account", exact: true })
+    .click();
   await page.getByText("Check your email to verify your account.").waitFor();
-  const verificationToken = testMail.find(item => item.subject.includes("Verify")).html.match(/verify\?token=([a-f0-9]+)/)[1];
+  const verificationToken = testMail
+    .find((item) => item.subject.includes("Verify"))
+    .html.match(/verify\?token=([a-f0-9]+)/)[1];
   const verificationUrl = `http://localhost:3199/verify?token=${verificationToken}`;
   await page.goto(verificationUrl);
-  await page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }).waitFor();
+  await page
+    .getByRole("heading", { name: "Make it yours", exact: true })
+    .waitFor();
   // Reopen the consumed link without the first browser's login cookie.
   await context.clearCookies();
   await page.goto(verificationUrl);
-  await page.getByRole("heading", { name: "Email verified", exact: true }).waitFor();
-  await page.getByText("This email has already been verified.", { exact: true }).waitFor();
+  await page
+    .getByRole("heading", { name: "Email verified", exact: true })
+    .waitFor();
+  await page
+    .getByText("This email has already been verified.", { exact: true })
+    .waitFor();
   await page.getByRole("link", { name: "Continue to sign in" }).click();
   await page.getByLabel("Work email").fill("owner@example.com");
   await page.locator("#password").fill("A strong test password 123!");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }).waitFor();
+  await page
+    .getByRole("heading", { name: "Make it yours", exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Continue to workspace" })
+      .isEnabled(),
+    false,
+  );
+  await page.getByLabel("Profile picture").setInputFiles({
+    name: "profile.png",
+    mimeType: "image/png",
+    buffer: await sharp({
+      create: { width: 80, height: 60, channels: 3, background: "#6558df" },
+    })
+      .png()
+      .toBuffer(),
+  });
+  await page.getByRole("button", { name: "Save photo", exact: true }).click();
+  await page.locator(".photo-preview img").waitFor();
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+    true,
+    "Setup fits a phone screen",
+  );
+  mkdirSync("test-results", { recursive: true });
+  await page.screenshot({
+    path: "test-results/onboarding-mobile.png",
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  const pendingOwner = service.db
+    .prepare("SELECT id FROM users WHERE email=?")
+    .get("owner@example.com");
+  // The OAuth handshake is exercised in API tests; simulate its saved connection here.
+  service.db
+    .prepare("UPDATE users SET google_refresh=?,google_email=? WHERE id=?")
+    .run("browser-test-connection", "owner@example.com", pendingOwner.id);
+  service.config.calendarProvider = {
+    busy: async () => [],
+    create: async () => ({}),
+  };
+  await page.reload();
+  await page.getByRole("button", { name: "Continue to workspace" }).click();
+  await page
+    .getByRole("heading", { name: /Good (morning|afternoon|evening)/ })
+    .waitFor();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Check connection", exact: true })
+    .click();
+  await page
+    .getByText("Google Calendar availability is working.", { exact: true })
+    .waitFor();
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   completed++;
-  console.log("PASS browser: first verification, reopened link and normal sign-in");
+  console.log(
+    "PASS browser: first-time setup, photo upload and calendar connection gate",
+  );
+  completed++;
+  console.log(
+    "PASS browser: first verification, reopened link and normal sign-in",
+  );
   await page.goto("http://localhost:3199/login");
   await page.getByRole("button", { name: "Explore the demo" }).click();
   await page
@@ -79,6 +166,10 @@ try {
     .click();
   await page.getByLabel("What’s the occasion?").fill("Annual review");
   await page.getByLabel("Duration", { exact: true }).selectOption("45");
+  await page.getByLabel("Where", { exact: true }).selectOption("Zoom");
+  await page
+    .getByLabel("Zoom meeting link", { exact: true })
+    .fill("https://us02web.zoom.us/j/1234567890?pwd=test-only");
   await page
     .getByLabel("A little about this meeting")
     .fill("A focused review of your year.");
@@ -135,13 +226,11 @@ try {
   // Choose a future weekday with availability, allowing month boundaries.
   let day = DateTime.now().setZone(me.user.timezone).plus({ days: 1 });
   while (day.weekday > 5) day = day.plus({ days: 1 });
-  const dayName = day
-    .toJSDate()
-    .toLocaleDateString("en-US", {
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
+  const dayName = day.toJSDate().toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
   if (day.month !== DateTime.now().month)
     await booking.getByRole("button", { name: "Next month" }).click();
   await booking.getByRole("button", { name: dayName, exact: true }).click();
@@ -157,6 +246,12 @@ try {
   await booking
     .getByRole("heading", { name: "You’re on the calendar." })
     .waitFor();
+  assert.equal(
+    await booking
+      .getByRole("link", { name: "Join Zoom", exact: true })
+      .getAttribute("href"),
+    "https://us02web.zoom.us/j/1234567890?pwd=test-only",
+  );
   await booking.screenshot({
     path: "test-results/booking-confirmation.png",
     fullPage: true,
