@@ -1304,6 +1304,15 @@ export function createApp(options = {}) {
       409,
       "Reconnect the original Google account before changing this appointment.",
     );
+    const bindingMatches = (record) =>
+      record &&
+      (!record.google_account || record.google_account === accountId(u)) &&
+      (!record.google_calendar || record.google_calendar === calendarId(u));
+    need(
+      bindingMatches(b),
+      409,
+      "Reconnect this appointment's original Google account and calendar before changing it.",
+    );
     if (!b.google_account || !b.google_calendar) {
       // Never assume a legacy booking belongs to whichever account is connected now.
       let remote;
@@ -1313,11 +1322,19 @@ export function createApp(options = {}) {
       const expected = b.parent_id
         ? get("SELECT * FROM bookings WHERE id=?", b.parent_id)
         : b;
+      need(
+        bindingMatches(expected),
+        409,
+        "The original appointment belongs to a different Google account or calendar.",
+      );
       const matches = (candidate) =>
         candidate &&
         remote &&
         remote.status !== "cancelled" &&
         remote.id === b.google_id &&
+        remote.organizer?.self === true &&
+        remote.organizer.email?.toLowerCase() ===
+          calendarId(u).toLowerCase() &&
         DateTime.fromISO(remote.start?.dateTime || "").toMillis() ===
           DateTime.fromISO(candidate.start).toMillis() &&
         DateTime.fromISO(remote.end?.dateTime || "").toMillis() ===
@@ -1326,6 +1343,16 @@ export function createApp(options = {}) {
         matches(b) || matches(expected),
         409,
         "This older appointment's original calendar is unverified. Reconnect its original Google account and check the event before changing it.",
+      );
+      // OAuth may have completed while the legacy event lookup was in flight.
+      // Do not establish a binding from stale credentials and strand the booking.
+      const current = get("SELECT * FROM users WHERE id=?", u.id);
+      need(
+        accountId(current) === accountId(u) &&
+          calendarId(current) === calendarId(u) &&
+          current.google_refresh === u.google_refresh,
+        409,
+        "The calendar connection changed during verification. Please try again.",
       );
       run(
         "UPDATE bookings SET google_account=?,google_calendar=? WHERE id=? OR id=?",
@@ -2481,25 +2508,31 @@ export function createApp(options = {}) {
     const sameAccount = fresh.google_account
       ? fresh.google_account === info.sub
       : fresh.google_email?.toLowerCase() === info.email.toLowerCase();
+    // Unbound legacy records do not prove which account owns them. Permit a
+    // corrective reconnect, but preserve every established appointment binding.
     need(
       sameAccount ||
-        !hasOpenBookings(fresh.id) ||
-        (!fresh.google_account &&
-          !fresh.google_email &&
-          !get(
-            "SELECT id FROM bookings WHERE user_id=? AND google_account IS NOT NULL AND (status='pending' OR (status='scheduled' AND end>?))",
-            fresh.id,
-            new Date().toISOString(),
-          )),
+        !get(
+          "SELECT id FROM bookings WHERE user_id=? AND (google_account IS NOT NULL OR google_calendar IS NOT NULL) AND (status='pending' OR (status='scheduled' AND end>?))",
+          fresh.id,
+          new Date().toISOString(),
+        ),
       409,
       "Existing appointments belong to your original Google account. Reconnect that account before switching calendars.",
     );
+    // A stable Google subject can acquire a new email address. Keep the
+    // established calendar identifier so existing appointments stay aligned.
+    const nextCalendar = sameAccount
+      ? fresh.google_calendar ||
+        fresh.google_email?.toLowerCase() ||
+        info.email.toLowerCase()
+      : info.email.toLowerCase();
     run(
       "UPDATE users SET google_refresh=?,google_email=?,google_account=?,google_calendar=? WHERE id=?",
       encrypt(data.refresh_token),
       info.email,
       info.sub,
-      info.email.toLowerCase(),
+      nextCalendar,
       req.user.id,
     );
     if (sameAccount && fresh.google_email)

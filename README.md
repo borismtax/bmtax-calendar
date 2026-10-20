@@ -71,7 +71,7 @@ The `borismtax/TaxSmartPlanner` repository uses `GOOGLE_CLIENT_ID` and `GOOGLE_C
 7. Put the client ID and secret into the calendar app’s secure settings.
 8. Register and verify `accounting@borismtax.com`, sign in, and open **Settings → Connect Google Calendar**. Each invited teammate connects their own Google account.
 
-Only the connected account’s **primary calendar** is checked and updated in this version. New bookings retain the account and calendar binding; legacy bookings must be verified against their original Google event before mutation. Reconnecting a different account or disconnecting is blocked while scheduled future or pending appointments exist. Secondary calendars, pooled/round-robin booking, payments, SMS, recurring appointments, and calendar webhooks are not implemented. Changes made directly in Google affect Google free/busy, but do not rewrite this app’s appointment records. Make cancellations and rescheduling through this app to keep its records and email notifications aligned.
+Only the connected account’s **primary calendar** is checked and updated in this version. New bookings retain the account and calendar binding; legacy bookings must be verified against their original organizer event before mutation. Reconnecting a different account is blocked while scheduled future or pending appointments have an established binding. If all open legacy appointments are still unbound, a mistaken reconnect can be corrected; ownership still requires verification. Disconnecting is blocked while scheduled future or pending appointments exist. Secondary calendars, pooled/round-robin booking, payments, SMS, recurring appointments, and calendar webhooks are not implemented. Changes made directly in Google affect Google free/busy, but do not rewrite this app’s appointment records. Make cancellations and rescheduling through this app to keep its records and email notifications aligned.
 
 ## Connect Resend
 
@@ -115,6 +115,7 @@ npm run check
 npm test
 npx playwright install --with-deps chromium
 npm run test:browser
+npm run test:migrations # focused isolated backup/restore rehearsal; also included in npm test
 ```
 
 If Chromium is already installed, browser tests use `/usr/bin/chromium`, or set `CHROMIUM_PATH` to its executable. Browser screenshots are generated in `test-results/`. GitHub Actions runs the syntax checks, integration tests, and desktop/mobile browser workflows on every push and pull request.
@@ -124,6 +125,8 @@ Integration tests exercise a real SQLite database with controlled Google/Resend 
 ### Google Calendar availability errors
 
 In **Settings → Google Calendar → Check connection**, the app verifies the connected account’s availability access. If the Google Calendar API is disabled, enable **Google Calendar API** in the same Google Cloud project as the OAuth client. If permissions are denied, reconnect and approve both Calendar permissions. Do not change appointment durations or buffers to work around a provider failure: unchecked slots are never offered for booking.
+
+Follow [the Google setup repair steps](docs/GOOGLE_SETUP.md) to identify the exact project, enable the API and recheck connection/availability without submitting an appointment.
 
 ## Launch readiness and migrations
 

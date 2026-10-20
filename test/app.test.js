@@ -1310,6 +1310,9 @@ test("legacy bookings require remote identity/time verification before binding; 
     manage = manageToken(result),
     id = result.body.booking.id;
   s.db
+    .prepare("UPDATE users SET google_email=? WHERE id=?")
+    .run("legacy@example.test", s.user.id);
+  s.db
     .prepare(
       "UPDATE bookings SET google_account=NULL,google_calendar=NULL WHERE id=?",
     )
@@ -1326,6 +1329,7 @@ test("legacy bookings require remote identity/time verification before binding; 
   );
   s.config.calendarProvider.lookup = async () => ({
     id: result.body.booking.google_id,
+    organizer: { self: true, email: "legacy@example.test" },
     start: { dateTime: result.body.booking.start },
     end: { dateTime: result.body.booking.end },
   });
@@ -1336,7 +1340,7 @@ test("legacy bookings require remote identity/time verification before binding; 
   assert.equal(
     s.db.prepare("SELECT google_account FROM bookings WHERE id=?").get(id)
       .google_account,
-    "test-provider",
+    "legacy@example.test",
   );
 });
 
@@ -2018,4 +2022,334 @@ test("a still-running create operation cannot be reconciled concurrently", async
     .expect(409);
   release.resolve();
   assert.equal((await request).status, 201);
+});
+
+test("legacy event binding rejects attendee copies and mismatched or missing organizers", async (t) => {
+  const s = await setup(t),
+    result = await bookFirst(s),
+    manage = manageToken(result),
+    id = result.body.booking.id;
+  s.db
+    .prepare("UPDATE users SET google_email=? WHERE id=?")
+    .run("connected@example.test", s.user.id);
+  s.db
+    .prepare(
+      "UPDATE bookings SET google_account=NULL,google_calendar=NULL WHERE id=?",
+    )
+    .run(id);
+  const remote = {
+    id: result.body.booking.google_id,
+    start: { dateTime: result.body.booking.start },
+    end: { dateTime: result.body.booking.end },
+  };
+  for (const organizer of [
+    undefined,
+    { self: false, email: "original@example.test" },
+    { self: true, email: "different@example.test" },
+  ]) {
+    s.config.calendarProvider.lookup = async () => ({
+      ...remote,
+      organizer,
+    });
+    await s.anon.post(`/api/manage/${manage}/cancel`).send({}).expect(409);
+    await s.anon
+      .get(`/api/manage/${manage}/slots`)
+      .query({ date: s.day, timezone: "America/New_York" })
+      .expect(409);
+    await s.anon
+      .post(`/api/manage/${manage}/reschedule`)
+      .send({ start: s.slots[1], timezone: "America/New_York" })
+      .expect(409);
+    assert.equal(
+      s.db.prepare("SELECT google_account FROM bookings WHERE id=?").get(id)
+        .google_account,
+      null,
+    );
+  }
+  assert.equal(
+    s.calls.filter((c) => ["cancel", "update"].includes(c[0])).length,
+    0,
+  );
+  s.config.calendarProvider.lookup = async () => ({
+    ...remote,
+    organizer: { self: true, email: "connected@example.test" },
+  });
+  await s.anon.post(`/api/manage/${manage}/cancel`).send({}).expect(200);
+});
+
+test("a mistaken legacy reconnect can be corrected until ownership is verified, then its established binding is protected", async (t) => {
+  const s = await setup(t, {
+      googleId: "test-id",
+      googleSecret: "test-secret",
+      encryptionKey: "1".repeat(64),
+    }),
+    result = await bookFirst(s),
+    manage = manageToken(result),
+    id = result.body.booking.id;
+  s.db
+    .prepare(
+      "UPDATE bookings SET google_account=NULL,google_calendar=NULL WHERE id=?",
+    )
+    .run(id);
+  let identity = {
+    sub: "wrong-account",
+    email: "wrong@example.test",
+    email_verified: true,
+  };
+  t.mock.method(globalThis, "fetch", async (input) =>
+    String(input).includes("userinfo")
+      ? Response.json(identity)
+      : Response.json({
+          access_token: "synthetic-access",
+          refresh_token: "synthetic-refresh-" + identity.sub,
+        }),
+  );
+  const reconnect = async (status) => {
+    const state = new URL(
+      (
+        await s.agent.get("/api/google/connect").expect(302)
+      ).headers.location,
+    ).searchParams.get("state");
+    await s.agent
+      .get("/api/google/callback")
+      .query({ state, code: "synthetic-code" })
+      .expect(status);
+  };
+  await reconnect(302);
+  s.config.calendarProvider.lookup = async (u) => ({
+    id: result.body.booking.google_id,
+    organizer: {
+      self: u.google_email === "original@example.test",
+      email: "original@example.test",
+    },
+    start: { dateTime: result.body.booking.start },
+    end: { dateTime: result.body.booking.end },
+  });
+  await s.anon.post(`/api/manage/${manage}/cancel`).send({}).expect(409);
+  identity = {
+    sub: "original-account",
+    email: "original@example.test",
+    email_verified: true,
+  };
+  await reconnect(302);
+  await s.anon
+    .get(`/api/manage/${manage}/slots`)
+    .query({ date: s.day, timezone: "America/New_York" })
+    .expect(200);
+  assert.equal(
+    s.db.prepare("SELECT google_account FROM bookings WHERE id=?").get(id)
+      .google_account,
+    "original-account",
+  );
+  identity = {
+    sub: "wrong-account",
+    email: "wrong@example.test",
+    email_verified: true,
+  };
+  await reconnect(409);
+});
+
+test("OAuth identity changes during legacy verification cannot commit a stale binding or mutate the appointment", async (t) => {
+  const s = await setup(t, {
+      googleId: "test-id",
+      googleSecret: "test-secret",
+      encryptionKey: "1".repeat(64),
+    }),
+    result = await bookFirst(s),
+    manage = manageToken(result),
+    id = result.body.booking.id;
+  s.db
+    .prepare(
+      "UPDATE users SET google_account='original-account',google_email='original@example.test',google_calendar='original@example.test' WHERE id=?",
+    )
+    .run(s.user.id);
+  s.db
+    .prepare(
+      "UPDATE bookings SET google_account=NULL,google_calendar=NULL WHERE id=?",
+    )
+    .run(id);
+  let identity = {
+    sub: "wrong-account",
+    email: "wrong@example.test",
+    email_verified: true,
+  };
+  t.mock.method(globalThis, "fetch", async (input) =>
+    String(input).includes("userinfo")
+      ? Response.json(identity)
+      : Response.json({
+          access_token: "synthetic-access",
+          refresh_token: "synthetic-refresh",
+        }),
+  );
+  const reconnect = async () => {
+    const state = new URL(
+      (
+        await s.agent.get("/api/google/connect").expect(302)
+      ).headers.location,
+    ).searchParams.get("state");
+    await s.agent
+      .get("/api/google/callback")
+      .query({ state, code: "synthetic-code" })
+      .expect(302);
+  };
+  const entered = deferred(),
+    release = deferred();
+  s.config.calendarProvider.lookup = async () => {
+    entered.resolve();
+    await release.promise;
+    return {
+      id: result.body.booking.google_id,
+      organizer: { self: true, email: "original@example.test" },
+      start: { dateTime: result.body.booking.start },
+      end: { dateTime: result.body.booking.end },
+    };
+  };
+  const pending = s.anon
+    .get(`/api/manage/${manage}/slots`)
+    .query({ date: s.day, timezone: "America/New_York" })
+    .then((r) => r);
+  await entered.promise;
+  await reconnect();
+  release.resolve();
+  assert.equal((await pending).status, 409);
+  const stored = s.db.prepare("SELECT * FROM bookings WHERE id=?").get(id);
+  assert.equal(stored.google_account, null);
+  assert.equal(stored.status, "scheduled");
+  identity = {
+    sub: "original-account",
+    email: "original@example.test",
+    email_verified: true,
+  };
+  await reconnect();
+  await s.anon
+    .get(`/api/manage/${manage}/slots`)
+    .query({ date: s.day, timezone: "America/New_York" })
+    .expect(200);
+  assert.equal(
+    s.db.prepare("SELECT google_account FROM bookings WHERE id=?").get(id)
+      .google_account,
+    "original-account",
+  );
+});
+
+test("legacy verification never overwrites a partial binding or a pending reschedule parent's established binding", async (t) => {
+  const s = await setup(t),
+    result = await bookFirst(s),
+    manage = manageToken(result),
+    id = result.body.booking.id;
+  s.db
+    .prepare(
+      "UPDATE users SET google_email='other@example.test' WHERE id=?",
+    )
+    .run(s.user.id);
+  s.db
+    .prepare("UPDATE bookings SET google_calendar=NULL WHERE id=?")
+    .run(id);
+  let lookups = 0;
+  s.config.calendarProvider.lookup = async (u, b) => {
+    lookups++;
+    return {
+      id: b.google_id,
+      organizer: { self: true, email: u.google_email },
+      start: { dateTime: b.start },
+      end: { dateTime: b.end },
+    };
+  };
+  await s.anon.post(`/api/manage/${manage}/cancel`).send({}).expect(409);
+  assert.equal(lookups, 0);
+  assert.equal(
+    s.db.prepare("SELECT google_account FROM bookings WHERE id=?").get(id)
+      .google_account,
+    "test-provider",
+  );
+  s.db
+    .prepare(
+      "INSERT INTO bookings(id,event_id,user_id,name,email,timezone,start,end,status,manage_hash,google_id,title,location,created,operation,parent_id) SELECT 'legacy-child',event_id,user_id,name,email,timezone,start,end,'pending','synthetic-child-hash',google_id,title,location,?,'reschedule',id FROM bookings WHERE id=?",
+    )
+    .run(new Date(Date.now() - 120000).toISOString(), id);
+  await s.agent
+    .post("/api/bookings/legacy-child/reconcile")
+    .send({})
+    .expect(409);
+  const rows = s.db
+    .prepare("SELECT id,google_account FROM bookings ORDER BY id")
+    .all();
+  assert.equal(
+    rows.find((b) => b.id === "legacy-child").google_account,
+    null,
+  );
+  assert.equal(
+    rows.find((b) => b.id === id).google_account,
+    "test-provider",
+  );
+});
+
+test("same-account email renames preserve established and legacy calendar identifiers", async (t) => {
+  for (const legacyCalendar of [false, true]) {
+    const s = await setup(t, {
+      googleId: "test-id",
+      googleSecret: "test-secret",
+      encryptionKey: "1".repeat(64),
+    });
+    await connectGoogleWithResponses(s, t, (url, opts) => {
+      if (url.endsWith("/freeBusy"))
+        return Response.json({
+          calendars: { "calendar@example.com": { busy: [] } },
+        });
+      assert.equal(opts.method, "POST");
+      return Response.json({ id: JSON.parse(opts.body).id });
+    });
+    const result = await bookFirst(s);
+    if (legacyCalendar)
+      s.db
+        .prepare("UPDATE users SET google_calendar=NULL WHERE id=?")
+        .run(s.user.id);
+    let cancellations = 0;
+    t.mock.method(globalThis, "fetch", async (input, opts) => {
+      const url = String(input);
+      if (url === "https://oauth2.googleapis.com/token")
+        return Response.json({
+          access_token: "synthetic-access",
+          refresh_token: "synthetic-refresh",
+        });
+      if (url === "https://openidconnect.googleapis.com/v1/userinfo")
+        return Response.json({
+          sub: "google-account-one",
+          email: "renamed@example.com",
+          email_verified: true,
+        });
+      assert.equal(opts.method, "DELETE");
+      assert.ok(url.includes("/calendars/calendar%40example.com/events/"));
+      assert.ok(
+        url.includes(encodeURIComponent(result.body.booking.google_id)),
+      );
+      cancellations++;
+      return new Response(null, { status: 204 });
+    });
+    const state = new URL(
+      (
+        await s.agent.get("/api/google/connect").expect(302)
+      ).headers.location,
+    ).searchParams.get("state");
+    await s.agent
+      .get("/api/google/callback")
+      .query({ state, code: "synthetic-code" })
+      .expect(302);
+    const user = s.db
+        .prepare("SELECT * FROM users WHERE id=?")
+        .get(s.user.id),
+      booking = s.db
+        .prepare("SELECT * FROM bookings WHERE id=?")
+        .get(result.body.booking.id);
+    assert.equal(user.google_email, "renamed@example.com");
+    assert.equal(user.google_account, "google-account-one");
+    assert.equal(user.google_calendar, "calendar@example.com");
+    assert.equal(booking.google_account, user.google_account);
+    assert.equal(booking.google_calendar, user.google_calendar);
+    await s.anon
+      .post(`/api/manage/${manageToken(result)}/cancel`)
+      .send({})
+      .expect(200);
+    assert.equal(cancellations, 1);
+  }
 });
