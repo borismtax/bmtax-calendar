@@ -105,6 +105,665 @@ const guest = (start, extra = {}) => ({
   ...extra,
 });
 
+const eventBody = (event, extra = {}) => ({
+  title: event.title,
+  duration: event.duration,
+  description: event.description,
+  location: event.location,
+  meetingUrl: event.meeting_url || "",
+  instructions: event.instructions || "",
+  color: event.color,
+  active: !!event.active,
+  ...extra,
+});
+async function setEvent(s, changes, event = s.event) {
+  await s.agent
+    .patch(`/api/events/${event.id}`)
+    .send(eventBody(event, changes))
+    .expect(200);
+  return s.db.prepare("SELECT * FROM event_types WHERE id=?").get(event.id);
+}
+const getSlots = async (
+  s,
+  date = s.day,
+  timezone = "America/New_York",
+  path = s.path,
+) =>
+  (
+    await s.anon
+      .get(path + "/slots")
+      .query({ date, timezone })
+      .expect(200)
+  ).body.slots;
+const localTime = (s, time, day = s.day, timezone = "America/New_York") =>
+  DateTime.fromISO(`${day}T${time}`, { zone: timezone }).toUTC().toISO();
+const allDays = (start, end) =>
+  [1, 2, 3, 4, 5, 6, 7].map((day) => ({ day, start, end }));
+
+test("event schedules intersect overall split hours and date overrides, including closed days", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { windows: allDays("13:00", "15:00") });
+  let offered = await getSlots(s);
+  assert.deepEqual(
+    offered,
+    ["13:00", "13:15", "13:30", "13:45", "14:00", "14:15", "14:30"].map(
+      (time) => localTime(s, time),
+    ),
+  );
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(localTime(s, "09:00")))
+    .expect(409);
+  s.db
+    .prepare("UPDATE users SET windows=? WHERE id=?")
+    .run(
+      JSON.stringify([
+        ...allDays("09:00", "13:45"),
+        ...allDays("14:15", "17:00"),
+      ]),
+      s.user.id,
+    );
+  offered = await getSlots(s);
+  assert.deepEqual(
+    offered,
+    ["13:00", "13:15", "14:15", "14:30"].map((time) => localTime(s, time)),
+  );
+  s.db
+    .prepare("UPDATE users SET overrides=? WHERE id=?")
+    .run(
+      JSON.stringify([
+        { date: s.day, windows: [{ start: "14:00", end: "18:00" }] },
+      ]),
+      s.user.id,
+    );
+  assert.deepEqual(
+    await getSlots(s),
+    ["14:00", "14:15", "14:30"].map((time) => localTime(s, time)),
+  );
+  s.db
+    .prepare("UPDATE users SET overrides=? WHERE id=?")
+    .run(JSON.stringify([{ date: s.day, windows: [] }]), s.user.id);
+  assert.deepEqual(await getSlots(s), []);
+  const dates = await s.anon
+    .get(s.path + "/dates")
+    .query({ month: s.day.slice(0, 7), timezone: "America/New_York" })
+    .expect(200);
+  assert.ok(!dates.body.dates.includes(s.day));
+  s.db.prepare("UPDATE users SET overrides='[]' WHERE id=?").run(s.user.id);
+  await setEvent(s, { windows: [] });
+  assert.deepEqual(await getSlots(s), []);
+  await setEvent(s, { windows: allDays("06:00", "23:00") });
+  assert.equal((await getSlots(s))[0], localTime(s, "09:00"));
+  assert.equal((await getSlots(s)).at(-1), localTime(s, "16:30"));
+});
+
+test("event controls validate create/edit, retain omitted settings and support explicit inheritance", async (t) => {
+  const s = await setup(t);
+  const changes = {
+    windows: allDays("13:00", "15:00"),
+    bufferBefore: 0,
+    bufferAfter: 30,
+    slotInterval: 60,
+    slotAlignment: "clock",
+    dailyLimit: 2,
+  };
+  const created = (
+    await s.agent
+      .post("/api/events")
+      .send(eventBody(s.event, { ...changes, title: "Limited calls" }))
+      .expect(201)
+  ).body.event;
+  assert.deepEqual(JSON.parse(created.windows), changes.windows);
+  assert.equal(created.buffer_before, 0);
+  assert.equal(created.daily_limit, 2);
+  const edited = await setEvent(s, { title: "New title only" }, created);
+  for (const key of [
+    "windows",
+    "buffer_before",
+    "buffer_after",
+    "slot_interval",
+    "slot_alignment",
+    "daily_limit",
+  ])
+    assert.equal(edited[key], created[key]);
+  for (const bad of [
+    { dailyLimit: 0 },
+    { dailyLimit: -1 },
+    { dailyLimit: 1.5 },
+    { dailyLimit: "2" },
+    { bufferBefore: -1 },
+    { bufferAfter: 121 },
+    { slotInterval: 0 },
+    { slotInterval: 17 },
+    { slotAlignment: "hour" },
+    { windows: [{ day: 1, start: "15:00", end: "13:00" }] },
+    {
+      windows: [
+        { day: 1, start: "13:00", end: "15:00" },
+        { day: 1, start: "14:00", end: "16:00" },
+      ],
+    },
+  ]) {
+    await s.agent
+      .post("/api/events")
+      .send(eventBody(s.event, bad))
+      .expect(400);
+    await s.agent
+      .patch(`/api/events/${created.id}`)
+      .send(eventBody(created, bad))
+      .expect(400);
+  }
+  const reset = await setEvent(
+    s,
+    {
+      windows: null,
+      bufferBefore: null,
+      bufferAfter: null,
+      dailyLimit: null,
+    },
+    created,
+  );
+  for (const key of [
+    "windows",
+    "buffer_before",
+    "buffer_after",
+    "daily_limit",
+  ])
+    assert.equal(reset[key], null);
+  const foreign = await s.agent
+    .patch("/api/events/not-owned")
+    .send(eventBody(s.event, changes))
+    .expect(404);
+  assert.ok(foreign.body.error);
+});
+
+test("start interval and clock alignment differ from buffers, and off-grid submissions are rejected", async (t) => {
+  const s = await setup(t);
+  s.db
+    .prepare("UPDATE users SET windows=? WHERE id=?")
+    .run(JSON.stringify(allDays("09:10", "17:00")), s.user.id);
+  assert.equal((await getSlots(s))[0], localTime(s, "09:10"));
+  await setEvent(s, {
+    slotInterval: 60,
+    slotAlignment: "window",
+    bufferBefore: 0,
+    bufferAfter: 0,
+  });
+  assert.equal((await getSlots(s))[1], localTime(s, "10:10"));
+  await setEvent(s, { slotInterval: 60, slotAlignment: "clock" });
+  assert.deepEqual(
+    await getSlots(s),
+    [10, 11, 12, 13, 14, 15, 16].map((h) => localTime(s, `${h}:00`)),
+  );
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(localTime(s, "10:10")))
+    .expect(409);
+  await setEvent(s, { slotInterval: 30, slotAlignment: "clock" });
+  assert.equal((await getSlots(s))[0], localTime(s, "09:30"));
+});
+
+test("asymmetric buffers honor Google busy time and protect existing bookings across event types", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { bufferBefore: 10, bufferAfter: 30, slotInterval: 5 });
+  s.config.calendarProvider.busy = async () => [
+    { start: localTime(s, "12:00"), end: localTime(s, "13:00") },
+  ];
+  let offered = await getSlots(s);
+  assert.ok(offered.includes(localTime(s, "11:00")));
+  assert.ok(!offered.includes(localTime(s, "11:05")));
+  assert.ok(!offered.includes(localTime(s, "13:05")));
+  assert.ok(offered.includes(localTime(s, "13:10")));
+  s.config.calendarProvider.busy = async () => [];
+  const booked = await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(localTime(s, "12:00")))
+    .expect(201);
+  assert.equal(booked.body.booking.buffer_after, 30);
+  await setEvent(s, { bufferBefore: 0, bufferAfter: 0 });
+  const other = (
+    await s.agent
+      .post("/api/events")
+      .send(
+        eventBody(s.event, {
+          title: "Other calls",
+          bufferBefore: 0,
+          bufferAfter: 0,
+          slotInterval: 5,
+        }),
+      )
+      .expect(201)
+  ).body.event;
+  const path = `/api/public/${s.user.slug}/${other.slug}`;
+  offered = await getSlots(s, s.day, "America/New_York", path);
+  assert.ok(offered.includes(localTime(s, "11:20")));
+  assert.ok(!offered.includes(localTime(s, "11:25")));
+  assert.ok(!offered.includes(localTime(s, "12:55")));
+  assert.ok(offered.includes(localTime(s, "13:00")));
+  await s.anon
+    .post(path + "/bookings")
+    .send(guest(localTime(s, "12:45")))
+    .expect(409);
+});
+
+test("daily limits apply by event type, exclude canceled bookings, and default to unlimited", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { dailyLimit: 1 });
+  const first = await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[0]))
+    .expect(201);
+  assert.deepEqual(await getSlots(s), []);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[8]))
+    .expect(409);
+  const dates = (
+    await s.anon
+      .get(s.path + "/dates")
+      .query({ month: s.day.slice(0, 7), timezone: "America/New_York" })
+      .expect(200)
+  ).body.dates;
+  assert.ok(!dates.includes(s.day));
+  const other = (
+    await s.agent
+      .post("/api/events")
+      .send(eventBody(s.event, { title: "Unlimited type" }))
+      .expect(201)
+  ).body.event;
+  assert.equal(other.daily_limit, null);
+  assert.ok(
+    (
+      await getSlots(
+        s,
+        s.day,
+        "America/New_York",
+        `/api/public/${s.user.slug}/${other.slug}`,
+      )
+    ).length,
+  );
+  const manage = first.body.manageUrl.split("/").pop();
+  await s.anon.post(`/api/manage/${manage}/cancel`).send({}).expect(200);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[8]))
+    .expect(201);
+  await setEvent(s, { dailyLimit: null });
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[16]))
+    .expect(201);
+});
+
+test("simultaneous distinct-time bookings cannot exceed the atomic daily cap", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { dailyLimit: 1 });
+  let waiting = [];
+  s.config.calendarProvider.busy = () =>
+    new Promise((resolve) => {
+      waiting.push(resolve);
+      if (waiting.length === 2) waiting.forEach((r) => r([]));
+    });
+  const results = await Promise.all(
+    [s.slots[0], s.slots[8]].map((start) =>
+      s.anon.post(s.path + "/bookings").send(guest(start)),
+    ),
+  );
+  assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
+  assert.equal(s.calls.filter((c) => c[0] === "create").length, 1);
+  assert.equal(
+    s.db
+      .prepare(
+        "SELECT count(*) AS n FROM bookings WHERE status IN ('scheduled','pending')",
+      )
+      .get().n,
+    1,
+  );
+});
+
+test("unconfirmed creates retain daily capacity until a definitive failure releases it", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { dailyLimit: 1 });
+  s.config.calendarProvider.create = async () => {
+    throw new Error("timeout");
+  };
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[0]))
+    .expect(503);
+  assert.deepEqual(await getSlots(s), []);
+  s.db.prepare("UPDATE bookings SET status='failed'").run();
+  s.config.calendarProvider.create = async () => {
+    throw Object.assign(new Error("rejected"), { providerStatus: 400 });
+  };
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[8]))
+    .expect(503);
+  assert.ok((await getSlots(s)).length);
+});
+
+test("rescheduling excludes itself from the cap and rejects a full destination day", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { dailyLimit: 1 });
+  const booked = (
+    await s.anon
+      .post(s.path + "/bookings")
+      .send(guest(s.slots[0]))
+      .expect(201)
+  ).body;
+  const manage = booked.manageUrl.split("/").pop();
+  assert.ok(
+    (
+      await getSlots(s, s.day, "America/New_York", `/api/manage/${manage}`)
+    ).includes(s.slots[1]),
+  );
+  await s.anon
+    .post(`/api/manage/${manage}/reschedule`)
+    .send({ start: s.slots[1], timezone: "America/New_York" })
+    .expect(200);
+  const tomorrow = DateTime.fromISO(s.day).plus({ days: 1 }).toISODate();
+  const nextStart = (await getSlots(s, tomorrow))[0];
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(nextStart))
+    .expect(201);
+  await s.anon
+    .post(`/api/manage/${manage}/reschedule`)
+    .send({
+      start: localTime(s, "12:00", tomorrow),
+      timezone: "America/New_York",
+    })
+    .expect(409);
+  assert.equal(
+    s.db
+      .prepare("SELECT start FROM bookings WHERE id=?")
+      .get(booked.booking.id).start,
+    s.slots[1],
+  );
+});
+
+test("pending same-day reschedules count once and cross-day uncertainty reserves both days", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { dailyLimit: 2 });
+  const booked = (
+    await s.anon
+      .post(s.path + "/bookings")
+      .send(guest(s.slots[0]))
+      .expect(201)
+  ).body;
+  const manage = booked.manageUrl.split("/").pop();
+  s.config.calendarProvider.update = async () => {
+    throw new Error("uncertain");
+  };
+  await s.anon
+    .post(`/api/manage/${manage}/reschedule`)
+    .send({ start: s.slots[8], timezone: "America/New_York" })
+    .expect(503);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[16]))
+    .expect(201);
+  assert.deepEqual(await getSlots(s), []);
+  s.db
+    .prepare(
+      "UPDATE bookings SET status='failed' WHERE operation='reschedule'",
+    )
+    .run();
+  await setEvent(s, { dailyLimit: 1 });
+  const tomorrow = DateTime.fromISO(s.day).plus({ days: 1 }).toISODate();
+  await s.anon
+    .post(`/api/manage/${manage}/reschedule`)
+    .send({
+      start: localTime(s, "09:00", tomorrow),
+      timezone: "America/New_York",
+    })
+    .expect(503);
+  assert.deepEqual(await getSlots(s), []);
+  assert.deepEqual(await getSlots(s, tomorrow), []);
+});
+
+test("a booking and reschedule racing for the final daily place cannot both reserve", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { dailyLimit: 1 });
+  const booked = (
+    await s.anon
+      .post(s.path + "/bookings")
+      .send(guest(s.slots[0]))
+      .expect(201)
+  ).body;
+  const manage = booked.manageUrl.split("/").pop();
+  const tomorrow = DateTime.fromISO(s.day).plus({ days: 1 }).toISODate();
+  let waiting = [];
+  s.config.calendarProvider.busy = () =>
+    new Promise((resolve) => {
+      waiting.push(resolve);
+      if (waiting.length === 2) waiting.forEach((r) => r([]));
+    });
+  const result = await Promise.all([
+    s.anon
+      .post(s.path + "/bookings")
+      .send(guest(localTime(s, "09:00", tomorrow))),
+    s.anon
+      .post(`/api/manage/${manage}/reschedule`)
+      .send({
+        start: localTime(s, "13:00", tomorrow),
+        timezone: "America/New_York",
+      }),
+  ]);
+  assert.equal(
+    result.filter((r) => [200, 201].includes(r.status)).length,
+    1,
+  );
+  assert.equal(result.filter((r) => r.status === 409).length, 1);
+});
+
+test("host-local daily caps do not reset at UTC or guest midnight", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { dailyLimit: 1, bufferBefore: 0, bufferAfter: 0 });
+  s.db
+    .prepare("UPDATE users SET windows=? WHERE id=?")
+    .run(
+      JSON.stringify([
+        ...allDays("00:00", "02:00"),
+        ...allDays("20:00", "23:59"),
+      ]),
+      s.user.id,
+    );
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(localTime(s, "01:00"), { timezone: "Asia/Tokyo" }))
+    .expect(201);
+  const late = localTime(s, "22:00");
+  assert.notEqual(late.slice(0, 10), s.day);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(late, { timezone: "UTC" }))
+    .expect(409);
+  const next = DateTime.fromISO(s.day).plus({ days: 1 }).toISODate();
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(localTime(s, "01:00", next), { timezone: "Asia/Tokyo" }))
+    .expect(201);
+});
+
+test("custom hourly schedules and daily limits handle repeated and missing DST hours", async (t) => {
+  const originalNow = Settings.now;
+  t.after(() => {
+    Settings.now = originalNow;
+  });
+  Settings.now = () => Date.parse("2030-11-01T00:00:00Z");
+  const s = await setup(t);
+  s.db
+    .prepare("UPDATE users SET windows=? WHERE id=?")
+    .run(JSON.stringify(allDays("00:00", "05:00")), s.user.id);
+  await setEvent(s, {
+    windows: allDays("01:00", "04:00"),
+    slotInterval: 60,
+    slotAlignment: "clock",
+    dailyLimit: 1,
+    bufferBefore: 0,
+    bufferAfter: 0,
+  });
+  const fall = "2030-11-03";
+  const offered = await getSlots(s, fall);
+  const repeated = offered.filter(
+    (start) =>
+      DateTime.fromISO(start).setZone("America/New_York").hour === 1,
+  );
+  assert.equal(repeated.length, 2);
+  assert.equal(Date.parse(repeated[1]) - Date.parse(repeated[0]), 3600000);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(repeated[0]))
+    .expect(201);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(repeated[1]))
+    .expect(409);
+  Settings.now = () => Date.parse("2031-03-07T00:00:00Z");
+  const spring = await getSlots(s, "2031-03-09");
+  assert.deepEqual(
+    spring.map(
+      (start) => DateTime.fromISO(start).setZone("America/New_York").hour,
+    ),
+    [1, 3],
+  );
+  await setEvent(s, { windows: allDays("02:30", "04:00") });
+  assert.deepEqual(
+    (await getSlots(s, "2031-03-09")).map((start) =>
+      DateTime.fromISO(start).setZone("America/New_York").toFormat("HH:mm"),
+    ),
+    ["03:00"],
+    "A nonexistent window start does not hide valid clock-aligned starts after the gap",
+  );
+  await setEvent(s, {
+    windows: allDays("01:00", "02:00"),
+    slotInterval: 15,
+  });
+  assert.ok(
+    (await getSlots(s, "2031-03-09")).includes(
+      localTime(s, "01:30", "2031-03-09"),
+    ),
+    "A meeting may end exactly where the spring gap starts",
+  );
+});
+
+test("settings changed during provider I/O cannot be bypassed by a stale booking request", async (t) => {
+  const s = await setup(t);
+  let release, entered;
+  const inFlight = new Promise((resolve) => {
+    entered = resolve;
+  });
+  s.config.calendarProvider.busy = () =>
+    new Promise((resolve) => {
+      release = resolve;
+      entered();
+    });
+  const request = s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[0]))
+    .then((r) => r);
+  await inFlight;
+  await setEvent(s, { windows: allDays("13:00", "15:00") });
+  release([]);
+  const result = await request;
+  assert.equal(result.status, 409);
+  assert.match(result.body.error, /settings changed/i);
+  assert.equal(s.calls.length, 0);
+});
+
+test("simultaneous adjacent bookings respect either event's asymmetric buffer atomically", async (t) => {
+  const s = await setup(t);
+  await setEvent(s, { bufferBefore: 0, bufferAfter: 60 });
+  const other = (
+    await s.agent
+      .post("/api/events")
+      .send(
+        eventBody(s.event, {
+          title: "No buffer event",
+          bufferBefore: 0,
+          bufferAfter: 0,
+        }),
+      )
+      .expect(201)
+  ).body.event;
+  let waiting = [];
+  s.config.calendarProvider.busy = () =>
+    new Promise((resolve) => {
+      waiting.push(resolve);
+      if (waiting.length === 2) waiting.forEach((r) => r([]));
+    });
+  const results = await Promise.all([
+    s.anon.post(s.path + "/bookings").send(guest(localTime(s, "09:00"))),
+    s.anon
+      .post(`/api/public/${s.user.slug}/${other.slug}/bookings`)
+      .send(guest(localTime(s, "10:00"))),
+  ]);
+  assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
+});
+
+test("changing event hours also constrains management slots and rescheduling", async (t) => {
+  const s = await setup(t);
+  const booked = (
+    await s.anon
+      .post(s.path + "/bookings")
+      .send(guest(s.slots[0]))
+      .expect(201)
+  ).body;
+  const manage = booked.manageUrl.split("/").pop();
+  await setEvent(s, {
+    windows: allDays("13:00", "15:00"),
+    slotInterval: 60,
+    slotAlignment: "clock",
+    bufferBefore: 5,
+    bufferAfter: 30,
+    dailyLimit: 1,
+  });
+  assert.deepEqual(
+    await getSlots(s, s.day, "America/New_York", `/api/manage/${manage}`),
+    ["13:00", "14:00"].map((time) => localTime(s, time)),
+  );
+  await s.anon
+    .post(`/api/manage/${manage}/reschedule`)
+    .send({ start: s.slots[8], timezone: "America/New_York" })
+    .expect(409);
+  const changed = await s.anon
+    .post(`/api/manage/${manage}/reschedule`)
+    .send({ start: localTime(s, "13:00"), timezone: "America/New_York" })
+    .expect(200);
+  assert.equal(changed.body.booking.buffer_before, 5);
+  assert.equal(changed.body.booking.buffer_after, 30);
+});
+
+test("a 25-hour host day shares one cap from its first to its last hour", async (t) => {
+  const originalNow = Settings.now;
+  t.after(() => {
+    Settings.now = originalNow;
+  });
+  Settings.now = () => Date.parse("2030-11-01T00:00:00Z");
+  const s = await setup(t);
+  s.db
+    .prepare("UPDATE users SET windows=? WHERE id=?")
+    .run(JSON.stringify(allDays("00:00", "23:59")), s.user.id);
+  await setEvent(s, { dailyLimit: 1, bufferBefore: 0, bufferAfter: 0 });
+  const first = localTime(s, "00:00", "2030-11-03"),
+    last = localTime(s, "23:00", "2030-11-03");
+  assert.equal(Date.parse(last) - Date.parse(first), 24 * 3600000);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(first))
+    .expect(201);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(last, { timezone: "UTC" }))
+    .expect(409);
+  await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(localTime(s, "00:00", "2030-11-04")))
+    .expect(201);
+});
+
 test("verified owner account, secure session cookie, single-use verification and login", async (t) => {
   const s = await setup(t);
   const me = await s.agent.get("/api/me").expect(200);

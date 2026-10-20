@@ -2289,3 +2289,31 @@ p {
   padding: 8px;
   font-size: 12px;
 }
+
+.event-scheduling {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 12px;
+}
+.event-scheduling h3 {
+  margin: 18px 0 10px;
+}
+.event-scheduling fieldset {
+  border: 0;
+  min-width: 0;
+  padding: 0;
+  margin: 16px 0;
+}
+.event-scheduling legend {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.event-scheduling .availability-day {
+  padding: 10px 0;
+}
+.event-scheduling .hours-range {
+  flex-wrap: wrap;
+}
+.event-scheduling .hours-range input {
+  min-width: 0;
+}

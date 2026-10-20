@@ -225,6 +225,271 @@ try {
     "PASS browser: create event type and persist it across navigation",
   );
   await page
+    .getByRole("button", { name: "Create event type", exact: true })
+    .click();
+  let eventDialog = page.getByRole("dialog");
+  await eventDialog
+    .getByLabel("What’s the occasion?")
+    .fill("Afternoon consultation");
+  await eventDialog
+    .getByLabel("Event availability", { exact: true })
+    .selectOption("custom");
+  for (const name of [
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+  ])
+    await eventDialog.getByLabel(name, { exact: true }).uncheck();
+  await eventDialog.getByLabel("Monday", { exact: true }).check();
+  await eventDialog
+    .getByLabel("Event Monday start", { exact: true })
+    .fill("13:00");
+  await eventDialog
+    .getByLabel("Event Monday end", { exact: true })
+    .fill("15:00");
+  await eventDialog
+    .getByLabel("Buffer before", { exact: true })
+    .selectOption("5");
+  await eventDialog
+    .getByLabel("Buffer after", { exact: true })
+    .selectOption("15");
+  await eventDialog
+    .getByLabel("Start-time interval", { exact: true })
+    .selectOption("60");
+  await eventDialog
+    .getByLabel("Start-time alignment", { exact: true })
+    .selectOption("clock");
+  await eventDialog
+    .getByLabel("Maximum bookings per day", { exact: true })
+    .fill("0");
+  assert.equal(
+    await eventDialog
+      .getByLabel("Maximum bookings per day", { exact: true })
+      .evaluate((el) => el.checkValidity()),
+    false,
+  );
+  await eventDialog
+    .getByLabel("Maximum bookings per day", { exact: true })
+    .fill("2");
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(
+    await eventDialog.evaluate((el) => el.scrollWidth <= el.clientWidth),
+    true,
+    "Event scheduling fits mobile",
+  );
+  await eventDialog
+    .getByLabel("Start-time interval", { exact: true })
+    .scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: "test-results/event-scheduling-mobile.png",
+  });
+  await eventDialog
+    .getByRole("button", { name: "Create event type", exact: true })
+    .click();
+  await eventDialog.waitFor({ state: "hidden" });
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.reload();
+  await page
+    .getByRole("button", {
+      name: "Edit Afternoon consultation",
+      exact: true,
+    })
+    .click();
+  eventDialog = page.getByRole("dialog");
+  assert.equal(
+    await eventDialog
+      .getByLabel("Event availability", { exact: true })
+      .inputValue(),
+    "custom",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Event Monday start", { exact: true })
+      .inputValue(),
+    "13:00",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Buffer before", { exact: true })
+      .inputValue(),
+    "5",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Buffer after", { exact: true })
+      .inputValue(),
+    "15",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Start-time interval", { exact: true })
+      .inputValue(),
+    "60",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Start-time alignment", { exact: true })
+      .inputValue(),
+    "clock",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Maximum bookings per day", { exact: true })
+      .inputValue(),
+    "2",
+  );
+  completed++;
+  console.log(
+    "PASS browser: create event scheduling controls, validation, persistence and mobile layout",
+  );
+  await eventDialog
+    .getByRole("button", { name: "Add Monday hours", exact: true })
+    .click();
+  await eventDialog
+    .getByLabel("Event Monday start", { exact: true })
+    .last()
+    .fill("15:30");
+  await eventDialog
+    .getByLabel("Event Monday end", { exact: true })
+    .last()
+    .fill("17:00");
+  await eventDialog
+    .getByLabel("Maximum bookings per day", { exact: true })
+    .fill("1");
+  await eventDialog
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await eventDialog.waitFor({ state: "hidden" });
+  const controlsMe = (
+    await (await page.request.get("http://localhost:3199/api/me")).json()
+  ).user;
+  const controlsEvent = (
+    await (
+      await page.request.get("http://localhost:3199/api/events")
+    ).json()
+  ).events.find((e) => e.title === "Afternoon consultation");
+  let controlsDay = DateTime.now()
+    .setZone(controlsMe.timezone)
+    .plus({ days: 1 });
+  while (controlsDay.weekday !== 1)
+    controlsDay = controlsDay.plus({ days: 1 });
+  const controlsPath = `http://localhost:3199/api/public/${controlsMe.slug}/${controlsEvent.slug}`;
+  const controlsSlots = (
+    await (
+      await page.request.get(controlsPath + "/slots", {
+        params: {
+          date: controlsDay.toISODate(),
+          timezone: controlsMe.timezone,
+        },
+      })
+    ).json()
+  ).slots;
+  assert.deepEqual(
+    controlsSlots.map((start) =>
+      DateTime.fromISO(start)
+        .setZone(controlsMe.timezone)
+        .toFormat("HH:mm"),
+    ),
+    ["13:00", "14:00", "16:00"],
+  );
+  const capBooking = await page.request.post(controlsPath + "/bookings", {
+    data: {
+      name: "Local Cap Test",
+      email: "cap@example.test",
+      start: controlsSlots[0],
+      timezone: controlsMe.timezone,
+    },
+  });
+  assert.equal(capBooking.status(), 201);
+  const capPage = await context.newPage();
+  capPage.on("pageerror", (err) => errors.push(err.message));
+  await capPage.goto(
+    `http://localhost:3199/book/${controlsMe.slug}/${controlsEvent.slug}`,
+  );
+  await capPage
+    .getByLabel("Your time zone", { exact: true })
+    .selectOption(controlsMe.timezone);
+  if (controlsDay.month !== DateTime.now().month)
+    await capPage.getByRole("button", { name: "Next month" }).click();
+  const capDateLabel = controlsDay.toFormat("LLLL d, yyyy");
+  const capDayButton = capPage.getByRole("button", {
+    name: capDateLabel + " — closed",
+    exact: true,
+  });
+  await capDayButton.waitFor();
+  assert.equal(await capDayButton.isDisabled(), true);
+  await capPage.close();
+  completed++;
+  console.log(
+    "PASS browser: edited split event hours, hourly public slots and capped date closure",
+  );
+  await page
+    .getByRole("button", {
+      name: "Edit Afternoon consultation",
+      exact: true,
+    })
+    .click();
+  eventDialog = page.getByRole("dialog");
+  assert.equal(
+    await eventDialog
+      .getByLabel("Event Monday start", { exact: true })
+      .count(),
+    2,
+  );
+  await eventDialog
+    .getByLabel("Event availability", { exact: true })
+    .selectOption("inherit");
+  assert.equal(await page.locator("#event-weekly-hours").isHidden(), true);
+  await eventDialog
+    .getByLabel("Buffer before", { exact: true })
+    .selectOption("");
+  await eventDialog
+    .getByLabel("Buffer after", { exact: true })
+    .selectOption("");
+  await eventDialog
+    .getByLabel("Maximum bookings per day", { exact: true })
+    .fill("");
+  await eventDialog
+    .getByRole("button", { name: "Save changes", exact: true })
+    .click();
+  await eventDialog.waitFor({ state: "hidden" });
+  await page.reload();
+  await page
+    .getByRole("button", {
+      name: "Edit Afternoon consultation",
+      exact: true,
+    })
+    .click();
+  eventDialog = page.getByRole("dialog");
+  assert.equal(
+    await eventDialog
+      .getByLabel("Event availability", { exact: true })
+      .inputValue(),
+    "inherit",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Buffer before", { exact: true })
+      .inputValue(),
+    "",
+  );
+  assert.equal(
+    await eventDialog
+      .getByLabel("Maximum bookings per day", { exact: true })
+      .inputValue(),
+    "",
+  );
+  await eventDialog
+    .getByRole("button", { name: "Close dialog", exact: true })
+    .click();
+  completed++;
+  console.log(
+    "PASS browser: edit resets custom schedule, buffers and daily limit to inherited/unlimited",
+  );
+  await page
     .getByRole("link", { name: "Availability", exact: true })
     .click();
   await page

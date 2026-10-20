@@ -247,8 +247,9 @@ function seedLegacy(path, profiles) {
   return db;
 }
 
-for (const profiles of [false, true])
-  test(`online backup, restore and additive migration preserve ${profiles ? "c978424 profile/Zoom" : "61741fc pre-profile"} accounts and appointments`, async (t) => {
+for (const baseline of ["61741fc", "c978424", "49cf519"])
+  test(`online backup, restore and additive migration preserve ${baseline} accounts and appointments`, async (t) => {
+    const profiles = baseline !== "61741fc";
     const directory = mkdtempSync(join(tmpdir(), "bmt-backup-rehearsal-"));
     const paths = Object.fromEntries(
       [
@@ -274,6 +275,23 @@ for (const profiles of [false, true])
     });
     try {
       source = seedLegacy(paths.source, profiles);
+      if (baseline === "49cf519") {
+        // Frozen deployed schema, independent of the current migration implementation.
+        source.exec(`ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
+          ALTER TABLE users ADD COLUMN overrides TEXT NOT NULL DEFAULT '[]';
+          ALTER TABLE users ADD COLUMN google_account TEXT;
+          ALTER TABLE users ADD COLUMN google_calendar TEXT;
+          ALTER TABLE event_types ADD COLUMN instructions TEXT NOT NULL DEFAULT '';
+          ALTER TABLE bookings ADD COLUMN google_account TEXT;
+          ALTER TABLE bookings ADD COLUMN google_calendar TEXT;
+          ALTER TABLE bookings ADD COLUMN operation_started TEXT;
+          ALTER TABLE bookings ADD COLUMN instructions TEXT NOT NULL DEFAULT '';
+          ALTER TABLE bookings ADD COLUMN phone TEXT NOT NULL DEFAULT '';
+          ALTER TABLE bookings ADD COLUMN meet_state TEXT NOT NULL DEFAULT 'none';
+          ALTER TABLE bookings ADD COLUMN meet_retry_at INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE bookings ADD COLUMN meet_attempts INTEGER NOT NULL DEFAULT 0;
+          UPDATE bookings SET meet_state='pending' WHERE status='scheduled' AND location='Google Meet' AND meet_url IS NULL AND google_id IS NOT NULL;`);
+      }
       const original = snapshot(source),
         originalSchema = schema(source);
       assert.ok(
@@ -354,6 +372,30 @@ for (const profiles of [false, true])
         ),
         "Migration never guesses old calendar ownership",
       );
+      for (const event of migrated.event_types) {
+        assert.equal(
+          event.windows,
+          null,
+          "Existing event inherits overall availability",
+        );
+        assert.equal(event.buffer_before, null);
+        assert.equal(event.buffer_after, null);
+        assert.equal(event.slot_interval, 15);
+        assert.equal(event.slot_alignment, "window");
+        assert.equal(
+          event.daily_limit,
+          null,
+          "Existing event stays unlimited",
+        );
+      }
+      for (const booking of migrated.bookings) {
+        assert.equal(
+          booking.buffer_before,
+          null,
+          "Legacy booking retains shared buffer behavior",
+        );
+        assert.equal(booking.buffer_after, null);
+      }
       const afterSchema = schema(service.db);
       service.close();
       service = null;
@@ -444,6 +486,16 @@ for (const profiles of [false, true])
         0,
       );
       await reopened.flushMail();
+      reopened.db
+        .prepare(
+          "UPDATE event_types SET windows=?,buffer_before=5,buffer_after=30,slot_interval=60,slot_alignment='clock',daily_limit=2 WHERE id='zoom-event'",
+        )
+        .run(JSON.stringify([{ day: 1, start: "13:00", end: "15:00" }]));
+      reopened.db
+        .prepare(
+          "UPDATE bookings SET buffer_before=5,buffer_after=30 WHERE id='zoom'",
+        )
+        .run();
       // Also rehearse backup/restore after migration and local state changes.
       const postMigration = snapshot(reopened.db);
       await backup(reopened.db, paths.upgradedBackup);
@@ -470,7 +522,7 @@ for (const profiles of [false, true])
       assert.equal(externalCalls, 0);
       t.diagnostic(
         JSON.stringify({
-          baseline: profiles ? "c978424" : "61741fc",
+          baseline,
           users: 4,
           eventTypes: 3,
           appointments: 6,
