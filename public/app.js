@@ -251,20 +251,36 @@ function authView(kind = "login", message = "") {
   };
   const [title, subtitle] = titles[kind] || titles.login;
   $("#app").innerHTML =
-    `<main class="auth-page"><aside class="auth-story">${brand()}<div class="story-content"><span class="eyebrow">Less back-and-forth. More possibilities.</span><h1>Great things<br>start with<br><em>a little time.</em></h1><p>A simpler way to bring people together.<br>Your calendar, your availability, your rules.</p><div class="story-booking"><div class="meeting-date"><small>Time</small><b>${icon("check")}</b></div><div><h3>One link. A confirmed meeting.</h3><p>That’s how simple scheduling should feel.</p></div><span class="check">${icon("check")}</span></div></div><footer>Thoughtfully built for the BMT team.</footer></aside><section class="auth-main"><div class="auth-form">${brand()}<h2>${title}</h2><p>${subtitle}</p>${message ? `<div class="form-success">${e(message)}</div>` : ""}${kind === "verify" ? '<div id="verify-result" class="loading">Verifying your email…</div>' : `<form id="auth-form">${signup ? `<div class="form-group"><label for="name">Full name</label><input id="name" name="name" placeholder="Alex Morgan" autocomplete="name" required minlength="2" maxlength="80"></div>` : ""}${!reset ? `<div class="form-group"><label for="email">Work email</label><input id="email" name="email" type="email" placeholder="you@company.com" autocomplete="email" value="${e(params.get("email") || "")}" required></div>` : ""}${!forgot ? `<div class="form-group"><label for="password">${reset ? "New password" : "Password"}</label><input id="password" name="password" type="password" placeholder="${signup || reset ? "At least 12 characters" : "Enter your password"}" autocomplete="${signup || reset ? "new-password" : "current-password"}" minlength="${signup || reset ? 12 : 1}" maxlength="128" required>${signup || reset ? "<small>Use at least 12 characters for a strong password.</small>" : ""}</div>` : ""}${kind === "login" ? `<div class="auth-meta"><span>${icon("shield")} Secure team access</span><a href="/forgot" data-nav>Forgot password?</a></div>` : ""}${signup && !params.get("invite") ? '<p class="small muted">Team members need an invitation. Administrators can use the configured owner email.</p>' : ""}<button class="btn full" type="submit">${signup ? "Create account" : forgot ? "Send reset link" : reset ? "Update password" : "Sign in"} ${icon("arrow")}</button></form>${kind === "login" && state.config.demo ? `<div class="divider">TAKE A LOOK AROUND</div><button class="btn secondary full" data-action="demo-login">Explore the demo ${icon("arrow")}</button>` : ""}<p class="auth-switch">${kind === "login" ? `New here? <a href="/signup" data-nav>Create an account</a>` : `<a href="/login" data-nav>Back to sign in</a>`}</p><p class="auth-note muted">By using BMT Calendar, you agree to your organization’s scheduling and data policies.</p>`}</div></section></main>`;
+    `<main class="auth-page"><aside class="auth-story">${brand()}<div class="story-content"><span class="eyebrow">Less back-and-forth. More possibilities.</span><h1>Great things<br>start with<br><em>a little time.</em></h1><p>A simpler way to bring people together.<br>Your calendar, your availability, your rules.</p><div class="story-booking"><div class="meeting-date"><small>Time</small><b>${icon("check")}</b></div><div><h3>One link. A confirmed meeting.</h3><p>That’s how simple scheduling should feel.</p></div><span class="check">${icon("check")}</span></div></div><footer>Thoughtfully built for the BMT team.</footer></aside><section class="auth-main"><div class="auth-form">${brand()}<h2>${title}</h2><p>${subtitle}</p>${message ? `<div class="form-success">${e(message)}</div>` : ""}${kind === "verify" ? '<div id="verify-result" class="loading">Verifying your email…</div>' : `<form id="auth-form">${signup ? `<div class="form-group"><label for="name">Full name</label><input id="name" name="name" placeholder="Alex Morgan" autocomplete="name" required minlength="2" maxlength="80"></div>` : ""}${!reset ? `<div class="form-group"><label for="email">Work email</label><input id="email" name="email" type="email" placeholder="you@company.com" autocomplete="email" value="${e(params.get("email") || "")}" required></div>` : ""}${!forgot ? `<div class="form-group"><label for="password">${reset ? "New password" : "Password"}</label><div class="password-field"><input id="password" name="password" type="password" placeholder="${signup || reset ? "At least 12 characters" : "Enter your password"}" autocomplete="${signup || reset ? "new-password" : "current-password"}" minlength="${signup || reset ? 12 : 1}" maxlength="128" required><button type="button" class="password-toggle" data-action="toggle-password" aria-controls="password" aria-label="Show password" aria-pressed="false">Show</button></div>${signup || reset ? "<small>Use at least 12 characters for a strong password.</small>" : ""}</div>` : ""}${kind === "login" ? `<div class="auth-meta"><span>${icon("shield")} Secure team access</span><a href="/forgot" data-nav>Forgot password?</a></div>` : ""}${signup && !params.get("invite") ? '<p class="small muted">Team members need an invitation. Administrators can use the configured owner email.</p>' : ""}<button class="btn full" type="submit">${signup ? "Create account" : forgot ? "Send reset link" : reset ? "Update password" : "Sign in"} ${icon("arrow")}</button></form>${kind === "login" && state.config.demo ? `<div class="divider">TAKE A LOOK AROUND</div><button class="btn secondary full" data-action="demo-login">Explore the demo ${icon("arrow")}</button>` : ""}<p class="auth-switch">${kind === "login" ? `New here? <a href="/signup" data-nav>Create an account</a>` : `<a href="/login" data-nav>Back to sign in</a>`}</p><p class="auth-note muted">By using BMT Calendar, you agree to your organization’s scheduling and data policies.</p>`}</div></section></main>`;
   if (kind === "verify") {
     api("/api/auth/verify", {
       method: "POST",
       body: { token: params.get("token") },
     })
       .then((data) => {
+        if (location.pathname !== "/verify" || new URLSearchParams(location.search).get("token") !== params.get("token")) return;
+        if (data.alreadyVerified) {
+          $(".auth-form > h2").textContent = "Email verified";
+          $(".auth-form > p").textContent = "Your account is ready. Sign in to continue.";
+          $("#verify-result").innerHTML = '<div class="form-success">This email has already been verified.</div><a href="/login" data-nav class="btn full">Continue to sign in</a>';
+          return;
+        }
         state.user = data.user;
         navigate("/app");
       })
       .catch((err) => {
-        $("#verify-result").innerHTML =
-          errorBox(err.message) +
-          `<a href="/login" data-nav>Back to sign in</a>`;
+        const result = $("#verify-result");
+        if (!result || new URLSearchParams(location.search).get("token") !== params.get("token")) return;
+        result.innerHTML = errorBox(err.message) +
+          `<p class="small muted">Already verified? <a href="/login" data-nav>Sign in</a>. Otherwise, request a fresh verification email below.</p><form id="verification-resend"><div class="form-group"><label for="verification-email">Work email</label><input id="verification-email" name="email" type="email" autocomplete="email" required></div><button type="submit" class="btn full">Send a new verification link</button></form>`;
+        $("#verification-resend").onsubmit = event => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          submit(form, async () => {
+            const data = await api("/api/auth/resend-verification", { method: "POST", body: { email: new FormData(form).get("email") } });
+            form.innerHTML = `<div class="form-success">${e(data.message)}</div><a href="/login" data-nav>Back to sign in</a>`;
+          });
+        };
       });
     return;
   }
@@ -906,6 +922,17 @@ async function renderRoute() {
   }
 }
 const actions = {
+  "toggle-password": button => {
+    const input = document.getElementById(button.getAttribute("aria-controls"));
+    const reveal = input.type === "password";
+    const start = input.selectionStart, end = input.selectionEnd;
+    input.type = reveal ? "text" : "password";
+    button.textContent = reveal ? "Hide" : "Show";
+    button.setAttribute("aria-label", reveal ? "Hide password" : "Show password");
+    button.setAttribute("aria-pressed", String(reveal));
+    input.focus();
+    if (start !== null && end !== null) input.setSelectionRange(start, end);
+  },
   "close-modal": () => closeModal(),
   "mobile-menu": () => $(".sidebar").classList.toggle("open"),
   "demo-login": async () => {

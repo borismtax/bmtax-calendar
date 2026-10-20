@@ -100,6 +100,14 @@ test("verified owner account, secure session cookie, single-use verification and
   assert.equal(me.body.user.role, "admin");
   assert.equal(me.body.user.password, undefined);
   await s.anon.get("/api/me").expect(401);
+  const replay = await s.anon.post("/api/auth/verify").send({ token: s.verify }).expect(200);
+  assert.deepEqual(replay.body, { alreadyVerified: true });
+  assert.equal(replay.headers["set-cookie"], undefined);
+  const untouchedBrowser = supertest.agent(s.app);
+  await untouchedBrowser.post("/api/auth/verify").send({ token: s.verify }).expect(200);
+  await untouchedBrowser.get("/api/me").expect(401);
+  await s.anon.post("/api/auth/verify").send({ token: "invalid-token" }).expect(400);
+  s.db.prepare("UPDATE tokens SET expires=? WHERE kind='verify'").run(Date.now() - 1);
   await s.anon.post("/api/auth/verify").send({ token: s.verify }).expect(400);
   await s.anon
     .post("/api/auth/login")

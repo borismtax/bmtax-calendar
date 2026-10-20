@@ -4,12 +4,15 @@ import assert from "node:assert/strict";
 import { mkdirSync, existsSync } from "node:fs";
 import { DateTime } from "luxon";
 
+const testMail = [];
 const service = createApp({
   dbPath: ":memory:",
   demo: true,
   baseUrl: "http://localhost:3199",
   production: false,
   testMode: true,
+  ownerEmail: "owner@example.com",
+  deliverMail: async item => testMail.push(item),
 });
 const server = service.app.listen(3199, "127.0.0.1");
 const browser = await chromium.launch({
@@ -29,6 +32,43 @@ try {
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
   });
+  for (const route of ["/login", "/signup", "/reset?token=test-placeholder"]) {
+    await page.goto("http://localhost:3199" + route);
+    const passwordInput = page.locator("#password");
+    await passwordInput.fill("A strong test password 123!");
+    assert.equal(await passwordInput.getAttribute("type"), "password");
+    await page.getByRole("button", { name: "Show password", exact: true }).click();
+    assert.equal(await passwordInput.getAttribute("type"), "text");
+    assert.equal(await passwordInput.inputValue(), "A strong test password 123!");
+    assert.equal(await page.getByRole("button", { name: "Hide password", exact: true }).getAttribute("aria-pressed"), "true");
+    await page.getByRole("button", { name: "Hide password", exact: true }).click();
+    assert.equal(await passwordInput.getAttribute("type"), "password");
+  }
+  completed++;
+  console.log("PASS browser: show/hide password on sign-in, registration and reset");
+  await page.goto("http://localhost:3199/signup");
+  await page.getByLabel("Full name").fill("Account Owner");
+  await page.getByLabel("Work email").fill("owner@example.com");
+  await page.locator("#password").fill("A strong test password 123!");
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  await page.getByText("Check your email to verify your account.").waitFor();
+  const verificationToken = testMail.find(item => item.subject.includes("Verify")).html.match(/verify\?token=([a-f0-9]+)/)[1];
+  const verificationUrl = `http://localhost:3199/verify?token=${verificationToken}`;
+  await page.goto(verificationUrl);
+  await page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }).waitFor();
+  // Reopen the consumed link without the first browser's login cookie.
+  await context.clearCookies();
+  await page.goto(verificationUrl);
+  await page.getByRole("heading", { name: "Email verified", exact: true }).waitFor();
+  await page.getByText("This email has already been verified.", { exact: true }).waitFor();
+  await page.getByRole("link", { name: "Continue to sign in" }).click();
+  await page.getByLabel("Work email").fill("owner@example.com");
+  await page.locator("#password").fill("A strong test password 123!");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }).waitFor();
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  completed++;
+  console.log("PASS browser: first verification, reopened link and normal sign-in");
   await page.goto("http://localhost:3199/login");
   await page.getByRole("button", { name: "Explore the demo" }).click();
   await page

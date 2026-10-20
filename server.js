@@ -494,11 +494,15 @@ export function createApp(options = {}) {
   });
   app.post("/api/auth/verify", (req, res) => {
     const t = readToken(req.body.token, "verify");
-    run("UPDATE users SET verified=1 WHERE id=?", t.user_id);
-    run("DELETE FROM tokens WHERE hash=?", t.hash);
     const user = get("SELECT * FROM users WHERE id=?", t.user_id);
+    need(user, 400, "This link is invalid or expired.");
+    // Keep the token until its original expiry so reopened links can show success.
+    // A repeated verification must never issue another authenticated session.
+    if (user.verified) return res.json({ alreadyVerified: true });
+    run("UPDATE users SET verified=1 WHERE id=?", t.user_id);
+    run("UPDATE tokens SET data='verified' WHERE user_id=? AND kind='verify'", user.id);
     session(res, user);
-    res.json({ user: safeUser(user) });
+    res.json({ user: safeUser({ ...user, verified: 1 }) });
   });
   app.post("/api/auth/login", (req, res) => {
     const body = z
