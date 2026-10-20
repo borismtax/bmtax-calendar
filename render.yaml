@@ -1,0 +1,34 @@
+# Single-instance service with a persistent disk. Never use ephemeral storage for appointments.
+services:
+  - type: web
+    name: bmt-calendar
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    disk:
+      name: calendar-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEMO_MODE
+        value: "false"
+      - key: DATABASE_PATH
+        value: /data/calendar.sqlite
+      - key: OWNER_EMAIL
+        value: accounting@borismtax.com
+      - key: MAIL_FROM
+        value: BMT Calendar <scheduling@mail.borismtax.com>
+      - key: APP_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: TRUST_PROXY_HOPS
+        value: "1"
