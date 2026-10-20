@@ -2228,3 +2228,64 @@ p {
     flex-direction: column;
   }
 }
+
+.availability-day {
+  border-bottom: 1px solid var(--line);
+  padding: 12px 0;
+}
+.hours-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+.hours-range input {
+  width: 120px;
+}
+.override-row {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+.override-row label {
+  flex: 1;
+  min-width: 150px;
+  font-size: 13px;
+}
+.override-row input {
+  display: block;
+  width: 100%;
+}
+.meeting-instructions {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.closed-date {
+  text-decoration: line-through;
+  opacity: 0.45;
+}
+.team-card .btn {
+  margin-top: 8px;
+}
+.availability-day > label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 550;
+}
+.availability-day input[type="checkbox"] {
+  accent-color: var(--purple);
+  width: 16px;
+  height: 16px;
+}
+.hours-range input,
+.override-row input {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+}

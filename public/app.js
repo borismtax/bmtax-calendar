@@ -4,9 +4,13 @@ const e = (value) =>
   String(value ?? "").replace(
     /[&<>"']/g,
     (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
-        c
-      ],
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c],
   );
 const icons = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -63,7 +67,11 @@ const state = {
   team: [],
   baseUrl: location.origin,
   tab: "upcoming",
-  calendarMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+  calendarMonth: new Date(
+    new Date().getFullYear(),
+    new Date().getMonth(),
+    1,
+  ),
   public: null,
 };
 const zones = [
@@ -96,7 +104,8 @@ const zoneOptions = (current) =>
 const fmt = (value, options = {}) =>
   new Intl.DateTimeFormat("en-US", {
     timeZone:
-      state.user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      state.user?.timezone ||
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
     ...options,
   }).format(new Date(value));
 const publicFmt = (value, options = {}) =>
@@ -118,7 +127,8 @@ const localDateKey = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const niceDate = (value) =>
   fmt(value, { month: "short", day: "numeric", year: "numeric" });
-const niceTime = (value) => fmt(value, { hour: "numeric", minute: "2-digit" });
+const niceTime = (value) =>
+  fmt(value, { hour: "numeric", minute: "2-digit" });
 const eventClass = (color) =>
   ({
     "#10b981": "green",
@@ -218,10 +228,16 @@ function closeModal() {
   $("#modal-root").innerHTML = "";
   lastFocus?.focus();
 }
-function confirmDialog(title, text, onConfirm) {
+function confirmDialog(
+  title,
+  text,
+  onConfirm,
+  label = "Cancel appointment",
+  success = "Appointment cancelled.",
+) {
   modal(
     title,
-    `<p class="muted">${e(text)}</p><div id="confirm-error"></div><div class="dialog-foot"><button class="btn secondary" data-action="close-modal">Keep appointment</button><button class="btn danger" id="confirm-action">Cancel appointment</button></div>`,
+    `<p class="muted">${e(text)}</p><div id="confirm-error"></div><div class="dialog-foot"><button class="btn secondary" data-action="close-modal">${label === "Cancel appointment" ? "Keep appointment" : "Go back"}</button><button class="btn danger" id="confirm-action">${e(label)}</button></div>`,
   );
   $("#confirm-action").onclick = async () => {
     const b = $("#confirm-action");
@@ -229,7 +245,7 @@ function confirmDialog(title, text, onConfirm) {
     try {
       await onConfirm();
       closeModal();
-      toast("Appointment cancelled.");
+      toast(success);
     } catch (err) {
       $("#confirm-error").innerHTML = errorBox(err.message);
       b.disabled = false;
@@ -247,7 +263,10 @@ function authView(kind = "login", message = "") {
       "Make room for what’s next",
       "Create your account and start scheduling.",
     ],
-    forgot: ["Forgot your password?", "We’ll email you a link to reset it."],
+    forgot: [
+      "Forgot your password?",
+      "We’ll email you a link to reset it.",
+    ],
     reset: ["A fresh start", "Choose a new password for your account."],
     verify: ["Verify your email", "Confirming your account…"],
   };
@@ -468,6 +487,18 @@ function bookingTable(rows) {
         "When someone books a time, you’ll find all the details here.",
       );
 }
+async function loadAllBookings(team = false) {
+  const bookings = [];
+  let offset = 0;
+  do {
+    const page = await api(
+      `/api/bookings?team=${team}&limit=500&offset=${offset}`,
+    );
+    bookings.push(...page.bookings);
+    offset = page.nextOffset;
+  } while (offset !== null);
+  return { bookings };
+}
 function bookingsView() {
   shell(
     "bookings",
@@ -488,7 +519,7 @@ function bookingsView() {
     $("#team-bookings").onchange = async (event) => {
       try {
         state.bookings = (
-          await api(`/api/bookings?team=${event.target.checked}`)
+          await loadAllBookings(event.target.checked)
         ).bookings;
         filterBookings();
       } catch (err) {
@@ -521,6 +552,12 @@ function filterBookings() {
     );
   $("#booking-results").innerHTML = bookingTable(rows);
 }
+function rangeEditor(day, label, start = "09:00", end = "17:00") {
+  return `<div class="hours-range" data-day="${day}"><input type="time" data-start aria-label="${label} start" value="${e(start)}" required><span>to</span><input type="time" data-end aria-label="${label} end" value="${e(end)}" required><button type="button" class="btn ghost" data-remove-range aria-label="Remove ${label} hours">Remove</button></div>`;
+}
+function overrideEditor(o = { date: "", windows: [] }) {
+  return `<div class="override-row"><label>Date<input type="date" data-override-date value="${e(o.date)}" required></label><label>Hours (blank = closed)<input data-override-hours value="${e(o.windows.map((w) => w.start + "-" + w.end).join(", "))}" placeholder="09:00-12:00, 13:00-17:00"></label><button type="button" class="btn ghost" data-remove-override>Remove date</button></div>`;
+}
 function availabilityView() {
   const u = state.user;
   shell(
@@ -539,12 +576,12 @@ function availabilityView() {
         "Sunday",
       ]
         .map((day, i) => {
-          const w = u.windows.find((w) => w.day === i + 1);
-          return `<div class="availability-row"><label><input type="checkbox" name="day-${i + 1}" ${w ? "checked" : ""}>${day}</label><input type="time" name="start-${i + 1}" aria-label="${day} start" value="${w?.start || "09:00"}"><span>to</span><input type="time" name="end-${i + 1}" aria-label="${day} end" value="${w?.end || "17:00"}"></div>`;
+          const windows = u.windows.filter((w) => w.day === i + 1);
+          return `<div class="availability-day"><label><input type="checkbox" name="day-${i + 1}" ${windows.length ? "checked" : ""}>${day}</label><div data-day-ranges="${i + 1}">${(windows.length ? windows : [{ start: "09:00", end: "17:00" }]).map((w) => rangeEditor(i + 1, day, w.start, w.end)).join("")}</div><button type="button" class="btn ghost" data-add-range="${i + 1}" data-label="${day}">Add ${day} hours</button></div>`;
         })
         .join(
           "",
-        )}${u.windows.some((w, i) => u.windows.findIndex((a) => a.day === w.day) !== i) ? '<div class="notice">You have split availability windows. Saving this form will use the first window shown for each day.</div>' : ""}</div></section><section class="panel"><div class="panel-head"><h2>A little breathing room</h2></div><div class="panel-body"><div class="form-group"><label for="buffer">Buffer around meetings</label><select id="buffer" name="buffer">${[0, 5, 10, 15, 20, 30, 45, 60, 90, 120].map((n) => `<option value="${n}" ${n === u.buffer ? "selected" : ""}>${n === 0 ? "No buffer" : n + " minutes"}</option>`).join("")}</select><small>Keep space before and after appointments.</small></div><div class="form-group"><label for="notice">Minimum booking notice</label><select id="notice" name="notice">${[
+        )}<h3>Holidays and date overrides</h3><p class="small muted">These replace the weekly hours for that date in your time zone. Leave hours blank to close a holiday.</p><div id="date-overrides">${(u.overrides || []).map(overrideEditor).join("")}</div><button type="button" class="btn secondary" id="add-override">Add date override</button></div></section><section class="panel"><div class="panel-head"><h2>A little breathing room</h2></div><div class="panel-body"><div class="form-group"><label for="buffer">Buffer around meetings</label><select id="buffer" name="buffer">${[0, 5, 10, 15, 20, 30, 45, 60, 90, 120].map((n) => `<option value="${n}" ${n === u.buffer ? "selected" : ""}>${n === 0 ? "No buffer" : n + " minutes"}</option>`).join("")}</select><small>Keep space before and after appointments.</small></div><div class="form-group"><label for="notice">Minimum booking notice</label><select id="notice" name="notice">${[
         [0, "No minimum"],
         [30, "30 minutes"],
         [60, "1 hour"],
@@ -563,19 +600,54 @@ function availabilityView() {
           "",
         )}</select><small>A little time to prepare for your next conversation.</small></div><div class="form-group"><label for="horizon">Booking window</label><select name="horizon" id="horizon">${[7, 14, 30, 60, 90, 120, 180].map((n) => `<option value="${n}" ${n === u.horizon ? "selected" : ""}>${n} days into the future</option>`).join("")}</select></div><div class="notice small">${icon("calendar")}Google Calendar busy events automatically block bookings.</div></div></section></div><div class="settings-actions"><button class="btn" type="submit">${icon("check")}Save availability</button></div></form>`,
   );
+  $("#add-override").onclick = () =>
+    $("#date-overrides").insertAdjacentHTML("beforeend", overrideEditor());
+  $("#availability-form").onclick = (event) => {
+    const button = event.target.closest("button");
+    if (button?.hasAttribute("data-add-range")) {
+      const day = button.dataset.addRange;
+      $(`[data-day-ranges="${day}"]`).insertAdjacentHTML(
+        "beforeend",
+        rangeEditor(day, button.dataset.label, "13:00", "17:00"),
+      );
+      $(`[name="day-${day}"]`).checked = true;
+    }
+    if (button?.hasAttribute("data-remove-range"))
+      button.closest(".hours-range").remove();
+    if (button?.hasAttribute("data-remove-override"))
+      button.closest(".override-row").remove();
+  };
   $("#availability-form").onsubmit = (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     submit(form, async () => {
       const f = new FormData(form),
         windows = [];
-      for (let day = 1; day <= 7; day++)
+      for (const row of form.querySelectorAll(".hours-range")) {
+        const day = Number(row.dataset.day);
         if (f.has("day-" + day))
           windows.push({
             day,
-            start: f.get("start-" + day),
-            end: f.get("end-" + day),
+            start: row.querySelector("[data-start]").value,
+            end: row.querySelector("[data-end]").value,
           });
+      }
+      const overrides = [...form.querySelectorAll(".override-row")].map(
+        (row) => ({
+          date: row.querySelector("[data-override-date]").value,
+          windows: row
+            .querySelector("[data-override-hours]")
+            .value.trim()
+            .split(",")
+            .filter((v) => v.trim())
+            .map((v) => {
+              const parts = v.trim().split("-");
+              if (parts.length !== 2)
+                throw new Error("Use hours like 09:00-12:00, 13:00-17:00.");
+              return { start: parts[0].trim(), end: parts[1].trim() };
+            }),
+        }),
+      );
       const result = await api("/api/me", {
         method: "PATCH",
         body: {
@@ -585,6 +657,7 @@ function availabilityView() {
           notice: Number(f.get("notice")),
           horizon: Number(f.get("horizon")),
           windows,
+          overrides,
         },
       });
       state.user = result.user;
@@ -638,11 +711,11 @@ function teamView() {
         ? `<button class="btn" data-action="invite">${icon("plus")}Invite teammate</button>`
         : "",
     ) +
-      `<section class="team-grid">${state.team.map((u) => `<article class="team-card">${avatar(u, "purple")}<h3>${e(u.name)}${u.id === state.user.id ? ' <span class="small muted">(you)</span>' : ""}</h3><p>${e(u.email || "Team member")}</p><div><span class="pill">${u.role === "admin" ? "Workspace admin" : "Team member"}</span></div>${u.googleConnected === false ? '<p class="small muted">Calendar connection pending</p>' : ""}<a href="/book/${e(u.slug)}" target="_blank" rel="noopener" class="btn secondary">${icon("external")}Booking page</a></article>`).join("")}</section>`,
+      `<section class="team-grid">${state.team.map((u) => `<article class="team-card">${avatar(u, "purple")}<h3>${e(u.name)}${u.id === state.user.id ? ' <span class="small muted">(you)</span>' : ""}</h3><p>${e(u.email || "Team member")}</p><div><span class="pill">${!u.active ? "Inactive · " : ""}${u.role === "admin" ? "Workspace admin" : "Team member"}</span></div>${u.googleConnected === false ? '<p class="small muted">Calendar connection pending</p>' : ""}<a href="/book/${e(u.slug)}" target="_blank" rel="noopener" class="btn secondary">${icon("external")}Booking page</a>${state.user.role === "admin" && u.id !== state.user.id ? `<button class="btn secondary" data-action="staff-active" data-id="${e(u.id)}" data-active="${!u.active}">${u.active ? "Deactivate" : "Reactivate"}</button><button class="btn ghost" data-action="staff-sessions" data-id="${e(u.id)}">Sign out all sessions</button>` : ""}</article>`).join("")}</section>`,
   );
 }
 function photoEditor(user) {
-  return `<div class="photo-editor"><div class="photo-preview">${avatar(user, "purple")}</div><form id="photo-form"><div class="form-group"><label for="profile-photo">Profile picture <span class="muted">(optional)</span></label><input id="profile-photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp"><small>JPG, PNG, or WebP, up to 2 MB. Your photo appears on your booking page and team profile.</small></div><button type="submit" class="btn secondary">Save photo</button>${user.photo ? '<button type="button" class="btn ghost" data-action="remove-photo">Remove photo</button>' : ""}</form></div>`;
+  return `<div class="photo-editor"><div class="photo-preview">${avatar(user, "purple")}</div><form id="photo-form"><div class="form-group"><label for="profile-photo">Profile picture ${user.onboardingComplete ? "" : '<span class="muted">(required)</span>'}</label><input id="profile-photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp"><small>JPG, PNG, or WebP, up to 2 MB. Your photo appears on your booking page and team profile.</small></div><button type="submit" class="btn secondary">Save photo</button>${user.photo ? '<button type="button" class="btn ghost" data-action="remove-photo">Remove photo</button>' : ""}</form></div>`;
 }
 function bindPhotoForm() {
   $("#photo-form").onsubmit = (event) => {
@@ -655,12 +728,16 @@ function bindPhotoForm() {
         !["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
         file.size > 2 * 1024 * 1024
       )
-        throw new Error("Choose a JPG, PNG, or WebP photo smaller than 2 MB.");
+        throw new Error(
+          "Choose a JPG, PNG, or WebP photo smaller than 2 MB.",
+        );
       const image = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result);
         reader.onerror = () =>
-          reject(new Error("This photo could not be read. Try another file."));
+          reject(
+            new Error("This photo could not be read. Try another file."),
+          );
         reader.readAsDataURL(file);
       });
       state.user = (
@@ -674,7 +751,7 @@ function bindPhotoForm() {
 function onboardingView() {
   const user = state.user;
   publicFrame(
-    `<section class="setup-card panel"><div class="setup-heading"><span class="eyebrow">WELCOME TO YOUR CALENDAR</span><h1>Make it yours</h1><p class="muted">Hi ${e(user.name.split(" ")[0])}, let’s get your profile and calendar ready.</p></div><div class="setup-step"><span class="step-number">1</span><div><h2>Add a familiar face</h2><p class="small muted">Help clients recognize who they’re meeting. You can add or change this later.</p>${photoEditor(user)}</div></div><div class="setup-step"><span class="step-number">2</span><div><h2>Connect Google Calendar</h2><p class="small muted">Check your availability and automatically add appointments to your calendar. Zoom appointments also use Google Calendar to prevent double bookings.</p>${user.googleConnected ? `<div class="form-success">${icon("check")} Connected to ${e(user.googleEmail || "Google Calendar")}</div>` : `<a class="btn secondary" href="/api/google/connect"><span class="google-logo small-google">G</span>Connect Google Calendar</a>`}${new URLSearchParams(location.search).get("google") === "denied" ? '<div class="form-error">The connection was cancelled. Please connect your calendar to finish setup.</div>' : ""}</div></div><div class="setup-footer"><button class="btn" data-action="finish-setup" ${user.googleConnected ? "" : "disabled"}>Continue to workspace ${icon("arrow")}</button><button class="btn ghost" data-action="logout">Sign out</button><p class="small muted">${user.googleConnected ? "You’re ready to set availability and share your first booking link." : "Connect your calendar to continue. Your profile picture can be added later."}</p></div></section>`,
+    `<section class="setup-card panel"><div class="setup-heading"><span class="eyebrow">WELCOME TO YOUR CALENDAR</span><h1>Make it yours</h1><p class="muted">Hi ${e(user.name.split(" ")[0])}, let’s get your profile and calendar ready.</p></div><div class="setup-step"><span class="step-number">1</span><div><h2>Add a familiar face</h2><p class="small muted">Upload a profile picture so clients recognize who they’re meeting. This is required to continue.</p>${photoEditor(user)}</div></div><div class="setup-step"><span class="step-number">2</span><div><h2>Connect Google Calendar</h2><p class="small muted">Check your availability and automatically add appointments to your calendar. Zoom appointments also use Google Calendar to prevent double bookings.</p>${user.googleConnected ? `<div class="form-success">${icon("check")} Connected to ${e(user.googleEmail || "Google Calendar")}</div>` : `<a class="btn secondary" href="/api/google/connect"><span class="google-logo small-google">G</span>Connect Google Calendar</a>`}${new URLSearchParams(location.search).get("google") === "denied" ? '<div class="form-error">The connection was cancelled. Please connect your calendar to finish setup.</div>' : ""}</div></div><div class="setup-footer"><button class="btn" data-action="finish-setup" ${user.googleConnected && user.photo ? "" : "disabled"}>Continue to workspace ${icon("arrow")}</button><button class="btn ghost" data-action="logout">Sign out</button><p class="small muted">${user.googleConnected && user.photo ? "You’re ready to set availability and share your first booking link." : "Upload your profile picture and connect Google Calendar to continue."}</p></div></section>`,
   );
   bindPhotoForm();
 }
@@ -722,7 +799,7 @@ function eventModal(id) {
   };
   modal(
     id ? "Edit event type" : "Create an event type",
-    `<form id="event-form"><div class="form-group"><label for="event-title">What’s the occasion?</label><input name="title" id="event-title" value="${e(v.title)}" placeholder="e.g. Tax strategy call" required minlength="2" maxlength="80"></div><div class="form-row"><div class="form-group"><label for="event-duration">Duration</label><select id="event-duration" name="duration">${[15, 30, 45, 60, 75, 90, 120, 150, 180, 240].map((n) => `<option value="${n}" ${n === v.duration ? "selected" : ""}>${n} minutes</option>`).join("")}</select></div><div class="form-group"><label for="event-location">Where</label><select id="event-location" name="location">${["Google Meet", "Zoom", "Phone call", "In person"].map((l) => `<option ${l === v.location ? "selected" : ""}>${l}</option>`).join("")}</select></div></div><div id="zoom-link-field" class="form-group" ${v.location === "Zoom" ? "" : "hidden"}><label for="event-zoom-link">Zoom meeting link</label><input type="url" id="event-zoom-link" name="meetingUrl" value="${e(v.meeting_url || "")}" placeholder="https://us02web.zoom.us/j/1234567890" ${v.location === "Zoom" ? "required" : "disabled"}><small>Paste an existing Zoom meeting link. It will be included in calendar invitations and confirmation emails. A new Zoom room is not created automatically.</small></div><div class="form-group"><label for="event-description">A little about this meeting</label><textarea name="description" id="event-description" placeholder="Let guests know what to expect…" maxlength="2000">${e(v.description)}</textarea></div><div class="form-group"><label>Event color</label><div class="color-options">${[
+    `<form id="event-form"><div class="form-group"><label for="event-title">What’s the occasion?</label><input name="title" id="event-title" value="${e(v.title)}" placeholder="e.g. Tax strategy call" required minlength="2" maxlength="80"></div><div class="form-row"><div class="form-group"><label for="event-duration">Duration</label><select id="event-duration" name="duration">${[15, 30, 45, 60, 75, 90, 120, 150, 180, 240].map((n) => `<option value="${n}" ${n === v.duration ? "selected" : ""}>${n} minutes</option>`).join("")}</select></div><div class="form-group"><label for="event-location">Where</label><select id="event-location" name="location">${["Google Meet", "Zoom", "Phone call", "In person"].map((l) => `<option ${l === v.location ? "selected" : ""}>${l}</option>`).join("")}</select></div></div><div id="zoom-link-field" class="form-group" ${v.location === "Zoom" ? "" : "hidden"}><label for="event-zoom-link">Zoom meeting link</label><input type="url" id="event-zoom-link" name="meetingUrl" value="${e(v.meeting_url || "")}" placeholder="https://us02web.zoom.us/j/1234567890" ${v.location === "Zoom" ? "required" : "disabled"}><small>Paste an existing Zoom meeting link. It will be included in calendar invitations and confirmation emails. A new Zoom room is not created automatically.</small></div><div class="form-group"><label for="event-instructions">Calling instructions or meeting address</label><textarea id="event-instructions" name="instructions" maxlength="1000" placeholder="For phone calls, say who calls whom. For in-person meetings, include the address and arrival details.">${e(v.instructions || "")}</textarea><small>Required for phone and in-person appointments. Shown to guests and included in invitations.</small></div><div class="form-group"><label for="event-description">A little about this meeting</label><textarea name="description" id="event-description" placeholder="Let guests know what to expect…" maxlength="2000">${e(v.description)}</textarea></div><div class="form-group"><label>Event color</label><div class="color-options">${[
       ["#6366f1", "purple"],
       ["#10b981", "green"],
       ["#f59e0b", "amber"],
@@ -756,6 +833,7 @@ function eventModal(id) {
           description: f.get("description"),
           location: f.get("location"),
           meetingUrl: f.get("meetingUrl") || "",
+          instructions: f.get("instructions"),
           color: f.get("color"),
           active: f.has("active"),
         },
@@ -766,12 +844,15 @@ function eventModal(id) {
     });
   };
 }
+function meetingInfo(b) {
+  return `${b.instructions ? `<p class="meeting-instructions">${e(b.instructions)}</p>` : ""}${b.phone ? `<p>Guest phone: ${e(b.phone)}</p>` : ""}${b.meet_state === "pending" ? '<p role="status">Your Google Meet link is being prepared. We will email it when ready. Refresh this page for updates.</p>' : b.meet_state === "failed" ? '<p role="status">The Google Meet link needs attention. Please contact the host.</p>' : ""}`;
+}
 function bookingDetails(id) {
   const b = state.bookings.find((b) => b.id === id);
   if (!b) return;
   modal(
     "Appointment details",
-    `<h3>${e(b.title)}</h3><div class="confirmation-summary"><p class="booking-detail">${icon("users")}${e(b.name)} · ${e(b.email)}</p><p class="booking-detail">${icon("calendar")}${niceDate(b.start)}</p><p class="booking-detail">${icon("clock")}${niceTime(b.start)} – ${niceTime(b.end)}</p><p class="booking-detail">${icon(locationIcon(b.location))}${e(b.location)}</p><span class="pill ${b.status === "cancelled" ? "cancelled" : ""}">${e(b.status)}</span></div>${b.notes ? `<p class="small muted"><strong>Guest notes</strong><br>${e(b.notes)}</p>` : ""}<div class="dialog-foot">${b.meet_url ? `<a href="${e(b.meet_url)}" target="_blank" rel="noopener" class="btn">${icon("video")}Join meeting</a>` : ""}${b.status === "pending" ? `<button class="btn secondary" data-action="reconcile-booking" data-id="${e(b.id)}">Check calendar status</button>` : ""}${b.status === "scheduled" && new Date(b.start) > new Date() ? `<button class="btn danger" data-action="cancel-booking" data-id="${e(b.id)}">Cancel appointment</button>` : ""}</div>`,
+    `<h3>${e(b.title)}</h3><div class="confirmation-summary"><p class="booking-detail">${icon("users")}${e(b.name)} · ${e(b.email)}</p><p class="booking-detail">${icon("calendar")}${niceDate(b.start)}</p><p class="booking-detail">${icon("clock")}${niceTime(b.start)} – ${niceTime(b.end)}</p><p class="booking-detail">${icon(locationIcon(b.location))}${e(b.location)}</p><span class="pill ${b.status === "cancelled" ? "cancelled" : ""}">${e(b.status)}</span></div>${meetingInfo(b)}${b.notes ? `<p class="small muted"><strong>Guest notes</strong><br>${e(b.notes)}</p>` : ""}<div class="dialog-foot">${b.meet_url ? `<a href="${e(b.meet_url)}" target="_blank" rel="noopener" class="btn">${icon("video")}Join meeting</a>` : ""}${b.status === "pending" || ["pending", "failed"].includes(b.meet_state) ? `<button class="btn secondary" data-action="reconcile-booking" data-id="${e(b.id)}">Check calendar status</button>` : ""}${b.status === "scheduled" && new Date(b.start) > new Date() ? `<button class="btn danger" data-action="cancel-booking" data-id="${e(b.id)}">Cancel appointment</button>` : ""}</div>`,
   );
 }
 function publicFrame(body) {
@@ -780,7 +861,7 @@ function publicFrame(body) {
 }
 function publicInfo() {
   const p = state.public;
-  return `<aside class="booking-info">${avatar(p.host, "purple")}<div class="muted">${e(p.host.name)}</div><h1>${e(p.event.title)}</h1><div class="booking-detail">${icon("clock")}${p.event.duration} minutes</div><div class="booking-detail">${icon(locationIcon(p.event.location))}${e(p.event.location)}</div>${p.start ? `<div class="booking-detail">${icon("calendar")}${publicFmt(p.start, { weekday: "short", month: "short", day: "numeric" })}</div><div class="booking-detail">${icon("clock")}${publicFmt(p.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</div>` : ""}<p>${e(p.event.description)}</p></aside>`;
+  return `<aside class="booking-info">${avatar(p.host, "purple")}<div class="muted">${e(p.host.name)}</div><h1>${e(p.event.title)}</h1><div class="booking-detail">${icon("clock")}${p.event.duration} minutes</div><div class="booking-detail">${icon(locationIcon(p.event.location))}${e(p.event.location)}</div>${p.start ? `<div class="booking-detail">${icon("calendar")}${publicFmt(p.start, { weekday: "short", month: "short", day: "numeric" })}</div><div class="booking-detail">${icon("clock")}${publicFmt(p.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</div>` : ""}<p>${e(p.event.description)}</p>${p.event.instructions ? `<p class="meeting-instructions">${e(p.event.instructions)}</p>` : ""}</aside>`;
 }
 async function hostPage(host) {
   const data = await api(`/api/public/${encodeURIComponent(host)}`);
@@ -818,18 +899,45 @@ function bookingPicker() {
     const key = localDateKey(new Date(m.getFullYear(), m.getMonth(), day)),
       disabled = key < today || key > last;
     cells.push(
-      `<button class="cal-day ${disabled ? "" : "available"} ${p.date === key ? "selected" : ""}" ${disabled ? "disabled" : ""} data-action="pick-date" data-date="${key}" aria-label="${e(new Date(m.getFullYear(), m.getMonth(), day).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }))}" aria-pressed="${p.date === key}">${day}</button>`,
+      `<button class="cal-day ${disabled ? "" : "candidate-date"} ${p.date === key ? "selected" : ""}" ${disabled ? "disabled" : ""} data-action="pick-date" data-date="${key}" aria-label="${e(new Date(m.getFullYear(), m.getMonth(), day).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }))}" aria-pressed="${p.date === key}">${day}</button>`,
     );
   }
   publicFrame(
-    `<section class="booking-card">${publicInfo()}<div class="booking-main"><h2>${p.manage ? "Choose your new time" : "Find your moment"}</h2><div class="booking-calendar-layout"><div><div class="calendar-head"><span>${m.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span><span><button data-action="public-prev" aria-label="Previous month">${icon("left")}</button><button data-action="public-next" aria-label="Next month">${icon("right")}</button></span></div><div class="calendar-grid">${["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"].map((d) => `<span class="weekday">${d}</span>`).join("")}${cells.join("")}</div><label class="timezone-field">${icon("globe")}<span class="visually-hidden">Your time zone</span><select id="guest-zone">${zoneOptions(p.timezone)}</select></label></div><div><p class="slot-date">${p.date ? e(new Date(p.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })) : "A time that works for you"}</p><div class="slots" id="slot-list"><p class="slot-empty">${p.date ? "Looking for available times…" : "Choose a date to see available times."}</p></div></div></div></div></section>`,
+    `<section class="booking-card">${publicInfo()}<div class="booking-main"><h2>${p.manage ? "Choose your new time" : "Find your moment"}</h2><div class="booking-calendar-layout"><div><div class="calendar-head"><span>${m.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span><span><button data-action="public-prev" aria-label="Previous month">${icon("left")}</button><button data-action="public-next" aria-label="Next month">${icon("right")}</button></span></div><div class="calendar-grid">${["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"].map((d) => `<span class="weekday">${d}</span>`).join("")}${cells.join("")}</div><label class="timezone-field">${icon("globe")}<span class="visually-hidden">Your time zone</span><select id="guest-zone" aria-label="Your time zone">${zoneOptions(p.timezone)}</select></label></div><div><p class="slot-date">${p.date ? e(new Date(p.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })) : "A time that works for you"}</p><div class="slots" id="slot-list"><p class="slot-empty">${p.date ? "Looking for available times…" : "Choose a date to see available times."}</p></div></div></div></div></section>`,
   );
   $("#guest-zone").onchange = (event) => {
     p.timezone = event.target.value;
     p.date = null;
     bookingPicker();
   };
+  loadOpenDates(p);
   if (p.date) loadSlots();
+}
+let dateRequest = 0;
+async function loadOpenDates(p) {
+  const id = ++dateRequest,
+    month = localDateKey(p.month).slice(0, 7);
+  try {
+    const result = await api(
+      `/api/public/${encodeURIComponent(p.hostSlug)}/${encodeURIComponent(p.eventSlug)}/dates?month=${month}&timezone=${encodeURIComponent(p.timezone)}`,
+    );
+    if (id !== dateRequest || state.public !== p) return;
+    for (const button of document.querySelectorAll(".cal-day[data-date]")) {
+      const open = result.dates.includes(button.dataset.date);
+      button.disabled = !open;
+      button.classList.toggle("available", open);
+      button.classList.toggle("closed-date", !open);
+      if (!open) {
+        button.title = "Closed or outside booking window";
+        button.setAttribute(
+          "aria-label",
+          button.getAttribute("aria-label") + " — closed",
+        );
+      }
+    }
+  } catch {
+    /* Slot lookup will show the connection error; dates remain selectable. */
+  }
 }
 let slotRequest = 0;
 async function loadSlots() {
@@ -838,14 +946,15 @@ async function loadSlots() {
     date = p.date;
   try {
     const result = await api(
-      `/api/public/${encodeURIComponent(p.hostSlug)}/${encodeURIComponent(p.eventSlug)}/slots?date=${encodeURIComponent(date)}&timezone=${encodeURIComponent(p.timezone)}`,
+      `${p.manage ? "/api/manage/" + encodeURIComponent(p.manage) : "/api/public/" + encodeURIComponent(p.hostSlug) + "/" + encodeURIComponent(p.eventSlug)}/slots?date=${encodeURIComponent(date)}&timezone=${encodeURIComponent(p.timezone)}`,
     );
-    if (id !== slotRequest || state.public !== p || !$("#slot-list")) return;
+    if (id !== slotRequest || state.public !== p || !$("#slot-list"))
+      return;
     $("#slot-list").innerHTML = result.slots.length
       ? result.slots
           .map(
             (start) =>
-              `<button class="slot" data-action="pick-slot" data-start="${e(start)}">${publicFmt(start, { hour: "numeric", minute: "2-digit" })}</button>`,
+              `<button class="slot" data-action="pick-slot" data-start="${e(start)}">${publicFmt(start, { hour: "numeric", minute: "2-digit", timeZoneName: "shortOffset" })}</button>`,
           )
           .join("")
       : '<p class="slot-empty">No available times on this date. Please try another day.</p>';
@@ -858,7 +967,7 @@ async function loadSlots() {
 function guestForm() {
   const p = state.public;
   publicFrame(
-    `<section class="booking-card">${publicInfo()}<div class="booking-main"><button class="back-link" data-action="back-picker">${icon("left")}Choose another time</button><h2>${p.manage ? "Confirm your new appointment" : "A few details, and you’re all set"}</h2><form id="guest-form" class="guest-form">${p.manage ? '<p class="muted small">Your original appointment stays in place until this change is confirmed.</p>' : `<div class="form-group"><label for="guest-name">Your name</label><input id="guest-name" name="name" placeholder="Full name" autocomplete="name" required minlength="2" maxlength="80"></div><div class="form-group"><label for="guest-email">Email address</label><input id="guest-email" name="email" type="email" placeholder="you@example.com" autocomplete="email" required></div><div class="form-group"><label for="guest-notes">Anything you’d like us to know? <span class="muted">(optional)</span></label><textarea id="guest-notes" name="notes" placeholder="Share a little context for your meeting…" maxlength="2000"></textarea><small>Please don’t include Social Security numbers, tax documents, or sensitive financial information.</small></div>`}<button class="btn full" type="submit">${p.manage ? "Confirm new time" : "Confirm appointment"} ${icon("check")}</button><p class="small muted">${p.manage ? "We’ll update your calendar invitation and email your new appointment details." : "By booking, you agree to receive emails about this appointment."}</p></form></div></section>`,
+    `<section class="booking-card">${publicInfo()}<div class="booking-main"><button class="back-link" data-action="back-picker">${icon("left")}Choose another time</button><h2>${p.manage ? "Confirm your new appointment" : "A few details, and you’re all set"}</h2><form id="guest-form" class="guest-form">${p.manage ? '<p class="muted small">Your original appointment stays in place until this change is confirmed.</p>' : `<div class="form-group"><label for="guest-name">Your name</label><input id="guest-name" name="name" placeholder="Full name" autocomplete="name" required minlength="2" maxlength="80"></div><div class="form-group"><label for="guest-email">Email address</label><input id="guest-email" name="email" type="email" placeholder="you@example.com" autocomplete="email" required></div>${p.event.location === "Phone call" ? '<div class="form-group"><label for="guest-phone">Phone number</label><input id="guest-phone" name="phone" type="tel" autocomplete="tel" required minlength="7" maxlength="40"><small>The host will use this number according to the calling instructions.</small></div>' : ""}<div class="form-group"><label for="guest-notes">Anything you’d like us to know? <span class="muted">(optional)</span></label><textarea id="guest-notes" name="notes" placeholder="Share a little context for your meeting…" maxlength="2000"></textarea><small>Please don’t include Social Security numbers, tax documents, or sensitive financial information.</small></div>`}<button class="btn full" type="submit">${p.manage ? "Confirm new time" : "Confirm appointment"} ${icon("check")}</button><p class="small muted">${p.manage ? "We’ll update your calendar invitation and email your new appointment details." : "By booking, you agree to receive emails about this appointment."}</p></form></div></section>`,
   );
   $("#guest-form").onsubmit = (event) => {
     event.preventDefault();
@@ -874,7 +983,8 @@ function guestForm() {
           : `/api/public/${encodeURIComponent(p.hostSlug)}/${encodeURIComponent(p.eventSlug)}/bookings`;
       const result = await api(path, { method: "POST", body });
       p.booking = result.booking;
-      p.manageUrl = result.manageUrl || `${location.origin}/manage/${p.manage}`;
+      p.manageUrl =
+        result.manageUrl || `${location.origin}/manage/${p.manage}`;
       bookingConfirmation(!!p.manage);
     });
   };
@@ -883,7 +993,7 @@ function bookingConfirmation(rescheduled = false) {
   const p = state.public,
     b = p.booking;
   publicFrame(
-    `<section class="booking-card">${publicInfo()}<div class="booking-main"><div class="confirmation"><span class="success-icon">${icon("check")}</span><h2>${rescheduled ? "A fresh time, all set." : "You’re on the calendar."}</h2><p>${rescheduled ? "Your appointment has been updated." : "Your appointment is confirmed."} ${state.config.demo ? "This is a local demo booking." : "Look out for a confirmation in your inbox."}</p><div class="confirmation-summary"><h3>${e(b.title)}</h3><p class="booking-detail">${icon("calendar")}${publicFmt(b.start, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p><p class="booking-detail">${icon("clock")}${publicFmt(b.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</p><p class="booking-detail">${icon("users")}${e(p.host.name)}</p><p class="booking-detail">${icon(locationIcon(b.location))}${e(b.location)}</p></div><div class="confirmation-actions"><a href="${e(p.manageUrl)}" class="btn secondary" data-nav>Manage appointment</a>${b.meet_url ? `<a class="btn" href="${e(b.meet_url)}" target="_blank" rel="noopener">Join ${b.location === "Zoom" ? "Zoom" : "Google Meet"}</a>` : ""}</div><p class="auth-note muted">Keep your management link private. It lets you reschedule or cancel.</p></div></div></section>`,
+    `<section class="booking-card">${publicInfo()}<div class="booking-main"><div class="confirmation"><span class="success-icon">${icon("check")}</span><h2>${rescheduled ? "A fresh time, all set." : "You’re on the calendar."}</h2><p>${rescheduled ? "Your appointment has been updated." : "Your appointment is confirmed."} ${state.config.demo ? "This is a local demo booking." : "Look out for a confirmation in your inbox."}</p><div class="confirmation-summary"><h3>${e(b.title)}</h3><p class="booking-detail">${icon("calendar")}${publicFmt(b.start, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p><p class="booking-detail">${icon("clock")}${publicFmt(b.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</p><p class="booking-detail">${icon("users")}${e(p.host.name)}</p><p class="booking-detail">${icon(locationIcon(b.location))}${e(b.location)}</p></div>${meetingInfo(b)}<div class="confirmation-actions"><a href="${e(p.manageUrl)}" class="btn secondary" data-nav>Manage appointment</a>${b.meet_url ? `<a class="btn" href="${e(b.meet_url)}" target="_blank" rel="noopener">Join ${b.location === "Zoom" ? "Zoom" : "Google Meet"}</a>` : ""}</div><p class="auth-note muted">Keep your management link private. It lets you reschedule or cancel.</p></div></div></section>`,
   );
 }
 async function manageView(value) {
@@ -902,7 +1012,7 @@ async function manageView(value) {
     start: b.start,
   };
   publicFrame(
-    `<section class="booking-card">${publicInfo()}<div class="booking-main"><div class="confirmation"><span class="success-icon">${icon(b.status === "cancelled" ? "close" : "check")}</span><h2>${b.status === "cancelled" ? "Appointment cancelled" : "Your appointment"}</h2><p>${b.status === "scheduled" ? "Need to make a change? You’re in the right place." : "This appointment is " + e(b.status) + "."}</p><div class="confirmation-summary"><h3>${e(b.title)}</h3><p class="booking-detail">${icon("calendar")}${publicFmt(b.start, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p><p class="booking-detail">${icon("clock")}${publicFmt(b.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</p><p class="booking-detail">${icon("mail")}${e(b.email)}</p></div><div class="confirmation-actions">${b.status === "scheduled" && new Date(b.start) > new Date() ? `${data.event.active ? '<button class="btn" data-action="guest-reschedule">Reschedule</button>' : ""}<button class="btn secondary" data-action="guest-cancel">Cancel appointment</button>` : `<a class="btn secondary" href="/book/${e(data.host.slug)}" data-nav>Book another time</a>`}${b.meet_url && b.status === "scheduled" ? `<a class="btn secondary" href="${e(b.meet_url)}" target="_blank" rel="noopener">Join meeting</a>` : ""}</div></div></div></section>`,
+    `<section class="booking-card">${publicInfo()}<div class="booking-main"><div class="confirmation"><span class="success-icon">${icon(b.status === "cancelled" ? "close" : "check")}</span><h2>${b.status === "cancelled" ? "Appointment cancelled" : "Your appointment"}</h2><p>${b.status === "scheduled" ? "Need to make a change? You’re in the right place." : "This appointment is " + e(b.status) + "."}</p><div class="confirmation-summary"><h3>${e(b.title)}</h3><p class="booking-detail">${icon("calendar")}${publicFmt(b.start, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p><p class="booking-detail">${icon("clock")}${publicFmt(b.start, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</p><p class="booking-detail">${icon("mail")}${e(b.email)}</p></div>${meetingInfo(b)}<div class="confirmation-actions">${b.status === "scheduled" && new Date(b.start) > new Date() ? `${data.event.active ? '<button class="btn" data-action="guest-reschedule">Reschedule</button>' : ""}<button class="btn secondary" data-action="guest-cancel">Cancel appointment</button>` : `<a class="btn secondary" href="/book/${e(data.host.slug)}" data-nav>Book another time</a>`}${b.meet_url && b.status === "scheduled" ? `<a class="btn secondary" href="${e(b.meet_url)}" target="_blank" rel="noopener">Join meeting</a>` : ""}</div></div></div></section>`,
   );
 }
 let routeGeneration = 0;
@@ -912,7 +1022,9 @@ async function renderRoute() {
   document.title = "BMT Calendar · Make time for what matters";
   const path = location.pathname;
   try {
-    if (["/login", "/signup", "/forgot", "/reset", "/verify"].includes(path)) {
+    if (
+      ["/login", "/signup", "/forgot", "/reset", "/verify"].includes(path)
+    ) {
       authView(path.slice(1));
       return;
     }
@@ -939,7 +1051,7 @@ async function renderRoute() {
     }
     const [events, bookings, team] = await Promise.all([
       api("/api/events"),
-      api("/api/bookings"),
+      loadAllBookings(),
       api("/api/team"),
     ]);
     if (generation !== routeGeneration) return;
@@ -994,7 +1106,8 @@ const actions = {
     button.disabled = true;
     const output = $("#calendar-health");
     if (output)
-      output.innerHTML = '<p class="small muted">Checking Google Calendar…</p>';
+      output.innerHTML =
+        '<p class="small muted">Checking Google Calendar…</p>';
     try {
       const result = await api("/api/google/status");
       if (output?.isConnected)
@@ -1017,7 +1130,9 @@ const actions = {
     await renderRoute();
   },
   "toggle-password": (button) => {
-    const input = document.getElementById(button.getAttribute("aria-controls"));
+    const input = document.getElementById(
+      button.getAttribute("aria-controls"),
+    );
     const reveal = input.type === "password";
     const start = input.selectionStart,
       end = input.selectionEnd;
@@ -1078,6 +1193,35 @@ const actions = {
     );
     calendarView();
   },
+  "staff-active": (el) =>
+    confirmDialog(
+      el.dataset.active === "true"
+        ? "Reactivate teammate?"
+        : "Deactivate teammate?",
+      "Deactivation signs out all sessions and closes new bookings. Existing appointments and Google events are retained for management.",
+      async () => {
+        await api(`/api/team/${el.dataset.id}`, {
+          method: "PATCH",
+          body: { active: el.dataset.active === "true" },
+        });
+        await renderRoute();
+      },
+      "Confirm",
+      "Team member updated.",
+    ),
+  "staff-sessions": (el) =>
+    confirmDialog(
+      "Sign out all sessions?",
+      "This teammate will need to sign in again. Their appointments remain unchanged.",
+      async () => {
+        await api(`/api/team/${el.dataset.id}/revoke-sessions`, {
+          method: "POST",
+          body: {},
+        });
+      },
+      "Confirm",
+      "Sessions revoked.",
+    ),
   "booking-details": (el) => bookingDetails(el.dataset.id),
   "cancel-booking": (el) => {
     const b = state.bookings.find((b) => b.id === el.dataset.id);
@@ -1085,7 +1229,10 @@ const actions = {
       "Cancel this appointment?",
       `We’ll notify ${b.name} and remove the appointment from Google Calendar.`,
       async () => {
-        await api(`/api/bookings/${b.id}/cancel`, { method: "POST", body: {} });
+        await api(`/api/bookings/${b.id}/cancel`, {
+          method: "POST",
+          body: {},
+        });
         await renderRoute();
       },
     );
@@ -1130,37 +1277,15 @@ const actions = {
     toast("Password reset link sent. Check your inbox.");
   },
   export: () => {
-    const fields = [
-        "title",
-        "name",
-        "email",
-        "start",
-        "end",
-        "timezone",
-        "status",
-        "location",
-      ],
-      csv = [
-        fields.join(","),
-        ...state.bookings.map((b) =>
-          fields
-            .map(
-              (f) =>
-                '"' +
-                String(b[f] || "")
-                  .replaceAll('"', '""')
-                  .replace(/^[=+@\-\t\r]/, "'$&") +
-                '"',
-            )
-            .join(","),
-        ),
-      ].join("\r\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const query = new URLSearchParams({
+      team: String($("#team-bookings")?.checked || false),
+      filter: $("#booking-filter")?.value || "all",
+      search: $("#booking-search")?.value || "",
+    });
     const a = document.createElement("a");
-    a.href = url;
+    a.href = `/api/bookings/export?${query}`;
     a.download = "bmt-appointments.csv";
     a.click();
-    URL.revokeObjectURL(url);
   },
   "pick-date": (el) => {
     state.public.date = el.dataset.date;

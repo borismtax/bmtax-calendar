@@ -4,16 +4,16 @@ Simple scheduling for the Boris M Tax team: individual booking pages, event type
 
 ## What is implemented
 
-- First-time setup after email verification guides staff through an optional profile photo and a working Google Calendar connection. Existing accounts retain dashboard access; photos can be updated in Settings. Images are decoded, cropped to 256×256, and re-encoded without original metadata.
+- First-time setup after email verification requires staff to upload a profile photo and verify a working Google Calendar connection before continuing in the UI or protected API. Existing accounts retain dashboard access; photos can be updated in Settings. Images are decoded, cropped to 256×256, and re-encoded without original metadata.
 - Verified email/password accounts, secure cookies, password reset, invitation-only team registration, and an administrator account for `accounting@borismtax.com`.
-- A responsive dashboard, appointment search, team view, monthly calendar, and CSV export.
+- A responsive dashboard, paginated appointment search, team view, monthly calendar, and complete filtered CSV exports beyond 1,000 appointments. Administrators can deactivate staff and revoke app sessions while retaining their appointments.
 - Zoom event types accept an existing HTTPS Zoom meeting link. Confirmations and Google Calendar invitations include that link; this app does not create new Zoom rooms or require Zoom API credentials.
 - Per-user appointment types, durations, descriptions, colors, and shareable links. Pausing an event type stops new bookings without cancelling existing ones.
-- Weekly working hours, IANA time zones, minimum notice, booking horizon, and buffers around appointments.
+- Split weekly working hours, holiday/date overrides, IANA time zones, minimum notice, booking horizon, buffers, closed-date display and distinct daylight-saving offsets.
 - Public booking without a client account, confirmation emails, private management links, cancellation, and rescheduling.
 - Per-user Google OAuth with PKCE, encrypted refresh tokens, primary-calendar free/busy checks, event creation, Google Meet, and updated/cancelled Google invitations.
 - Local overlap reservations prevent concurrent bookings within this app. Uncertain Google responses retain reservations for host reconciliation instead of freeing a potentially booked slot.
-- A persistent email outbox retries failed deliveries with Resend idempotency keys.
+- A persistent email outbox retries failed deliveries with Resend idempotency keys without blocking booking responses. Pending Google Meet links recover asynchronously from the existing event and notify both parties when ready.
 
 ## Run locally
 
@@ -71,7 +71,7 @@ The `borismtax/TaxSmartPlanner` repository uses `GOOGLE_CLIENT_ID` and `GOOGLE_C
 7. Put the client ID and secret into the calendar app’s secure settings.
 8. Register and verify `accounting@borismtax.com`, sign in, and open **Settings → Connect Google Calendar**. Each invited teammate connects their own Google account.
 
-Only the connected account’s **primary calendar** is checked and updated in this version. Secondary calendars, pooled/round-robin booking, payments, SMS, recurring appointments, and calendar webhooks are not implemented. Changes made directly in Google affect Google free/busy, but do not rewrite this app’s appointment records. Make cancellations and rescheduling through this app to keep its records and email notifications aligned.
+Only the connected account’s **primary calendar** is checked and updated in this version. New bookings retain the account and calendar binding; legacy bookings must be verified against their original Google event before mutation. Reconnecting a different account or disconnecting is blocked while scheduled future or pending appointments exist. Secondary calendars, pooled/round-robin booking, payments, SMS, recurring appointments, and calendar webhooks are not implemented. Changes made directly in Google affect Google free/busy, but do not rewrite this app’s appointment records. Make cancellations and rescheduling through this app to keep its records and email notifications aligned.
 
 ## Connect Resend
 
@@ -124,3 +124,7 @@ Integration tests exercise a real SQLite database with controlled Google/Resend 
 ### Google Calendar availability errors
 
 In **Settings → Google Calendar → Check connection**, the app verifies the connected account’s availability access. If the Google Calendar API is disabled, enable **Google Calendar API** in the same Google Cloud project as the OAuth client. If permissions are denied, reconnect and approve both Calendar permissions. Do not change appointment durations or buffers to work around a provider failure: unchecked slots are never offered for booking.
+
+## Launch readiness and migrations
+
+See [the launch checklist](docs/LAUNCH_CHECKLIST.md) for the recovered baseline, migration/rollback implications, single-process requirement, configuration blockers, acceptance checks and approval boundary. Existing users/appointments are preserved; legacy account bindings are never guessed. The October 27 target requires Google Calendar API enablement, verified deployment configuration and separately authorized live acceptance testing.
