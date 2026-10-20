@@ -201,7 +201,15 @@ export function createApp(options = {}) {
     google_account: "TEXT",
     google_calendar: "TEXT",
   });
-  migrate("event_types", { instructions: "TEXT NOT NULL DEFAULT ''" });
+  migrate("event_types", {
+    instructions: "TEXT NOT NULL DEFAULT ''",
+    windows: "TEXT",
+    buffer_before: "INTEGER",
+    buffer_after: "INTEGER",
+    slot_interval: "INTEGER NOT NULL DEFAULT 15",
+    slot_alignment: "TEXT NOT NULL DEFAULT 'window'",
+    daily_limit: "INTEGER",
+  });
   migrate("bookings", {
     google_account: "TEXT",
     google_calendar: "TEXT",
@@ -211,7 +219,12 @@ export function createApp(options = {}) {
     meet_state: "TEXT NOT NULL DEFAULT 'none'",
     meet_retry_at: "INTEGER NOT NULL DEFAULT 0",
     meet_attempts: "INTEGER NOT NULL DEFAULT 0",
+    buffer_before: "INTEGER",
+    buffer_after: "INTEGER",
   });
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS booking_daily_limit ON bookings(user_id,event_id,status,start)",
+  );
   // Previously scheduled Meet events without a link also enter the durable recovery queue.
   db.exec(
     "UPDATE bookings SET meet_state='pending' WHERE status='scheduled' AND location='Google Meet' AND meet_url IS NULL AND google_id IS NOT NULL AND meet_state='none'",
@@ -755,6 +768,17 @@ export function createApp(options = {}) {
   const rangeSchema = z
     .object({ start: timeSchema, end: timeSchema })
     .refine((w) => w.start < w.end, "End time must follow start time.");
+  const weeklySchema = z
+    .array(
+      z
+        .object({
+          day: z.number().int().min(1).max(7),
+          start: timeSchema,
+          end: timeSchema,
+        })
+        .refine((w) => w.start < w.end, "End time must follow start time."),
+    )
+    .max(42);
   const dateSchema = z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -935,8 +959,29 @@ export function createApp(options = {}) {
         "#3b82f6",
       ]),
       active: z.boolean().default(true),
+      windows: weeklySchema.nullable().optional(),
+      bufferBefore: z.number().int().min(0).max(120).nullable().optional(),
+      bufferAfter: z.number().int().min(0).max(120).nullable().optional(),
+      slotInterval: z
+        .union([5, 10, 15, 20, 30, 60, 90, 120].map((n) => z.literal(n)))
+        .optional(),
+      slotAlignment: z.enum(["window", "clock"]).optional(),
+      dailyLimit: z.number().int().min(1).max(1000).nullable().optional(),
     })
     .superRefine((event, ctx) => {
+      if (event.windows) {
+        for (let day = 1; day <= 7; day++) {
+          const ranges = event.windows
+            .filter((w) => w.day === day)
+            .sort((a, b) => a.start.localeCompare(b.start));
+          if (ranges.some((w, i) => i && ranges[i - 1].end > w.start))
+            ctx.addIssue({
+              code: "custom",
+              path: ["windows"],
+              message: "Availability windows must not overlap.",
+            });
+        }
+      }
       if (
         ["Phone call", "In person"].includes(event.location) &&
         !event.instructions
@@ -979,7 +1024,7 @@ export function createApp(options = {}) {
       "-" +
       randomBytes(2).toString("hex");
     run(
-      "INSERT INTO event_types(id,user_id,title,slug,duration,description,location,color,active,meeting_url,instructions) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO event_types(id,user_id,title,slug,duration,description,location,color,active,meeting_url,instructions,windows,buffer_before,buffer_after,slot_interval,slot_alignment,daily_limit) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id,
       req.user.id,
       b.title,
@@ -991,6 +1036,12 @@ export function createApp(options = {}) {
       Number(b.active),
       b.location === "Zoom" ? b.meetingUrl : "",
       b.instructions,
+      b.windows == null ? null : JSON.stringify(b.windows),
+      b.bufferBefore ?? null,
+      b.bufferAfter ?? null,
+      b.slotInterval ?? 15,
+      b.slotAlignment ?? "window",
+      b.dailyLimit ?? null,
     );
     res
       .status(201)
@@ -998,17 +1049,14 @@ export function createApp(options = {}) {
   });
   app.patch("/api/events/:id", auth, (req, res) => {
     const b = eventSchema.parse(req.body);
-    need(
-      get(
-        "SELECT id FROM event_types WHERE id=? AND user_id=?",
-        req.params.id,
-        req.user.id,
-      ),
-      404,
-      "Event type not found.",
+    const existing = get(
+      "SELECT * FROM event_types WHERE id=? AND user_id=?",
+      req.params.id,
+      req.user.id,
     );
+    need(existing, 404, "Event type not found.");
     run(
-      "UPDATE event_types SET title=?,duration=?,description=?,location=?,color=?,active=?,meeting_url=?,instructions=? WHERE id=?",
+      "UPDATE event_types SET title=?,duration=?,description=?,location=?,color=?,active=?,meeting_url=?,instructions=?,windows=?,buffer_before=?,buffer_after=?,slot_interval=?,slot_alignment=?,daily_limit=? WHERE id=?",
       b.title,
       b.duration,
       b.description,
@@ -1017,6 +1065,18 @@ export function createApp(options = {}) {
       Number(b.active),
       b.location === "Zoom" ? b.meetingUrl : "",
       b.instructions,
+      b.windows === undefined
+        ? existing.windows
+        : b.windows === null
+          ? null
+          : JSON.stringify(b.windows),
+      b.bufferBefore === undefined
+        ? existing.buffer_before
+        : b.bufferBefore,
+      b.bufferAfter === undefined ? existing.buffer_after : b.bufferAfter,
+      b.slotInterval ?? existing.slot_interval,
+      b.slotAlignment ?? existing.slot_alignment,
+      b.dailyLimit === undefined ? existing.daily_limit : b.dailyLimit,
       req.params.id,
     );
     res.json({ ok: true });
@@ -1374,12 +1434,12 @@ export function createApp(options = {}) {
   }
   async function busy(user, start, end, exclude = null) {
     const local = all(
-      "SELECT start,end FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND id<>? AND start<? AND end>?",
+      "SELECT start,end,buffer_before,buffer_after FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND id<>? AND start<? AND end>?",
       user.id,
       exclude?.id || "",
       end,
       start,
-    );
+    ).map((b) => ({ ...b, ...bookingBuffers(user, b) }));
     if (config.calendarProvider)
       return [
         ...local,
@@ -1494,6 +1554,96 @@ export function createApp(options = {}) {
     need(e, 404, "This event is not available for booking.");
     return { u, e };
   }
+  const eventBuffers = (u, e) => ({
+    before: e.buffer_before ?? u.buffer,
+    after: e.buffer_after ?? u.buffer,
+  });
+  const bookingBuffers = (u, b) => ({
+    before: b.buffer_before ?? u.buffer,
+    after: b.buffer_after ?? u.buffer,
+  });
+  // A gap can satisfy both appointments' buffers. Taking the larger required
+  // gap preserves the existing shared-buffer behavior instead of doubling it.
+  function overlaps(start, end, buffers, occupied) {
+    const from = Date.parse(start),
+      to = Date.parse(end);
+    return occupied.some(
+      (b) =>
+        Date.parse(b.start) <
+          to + Math.max(buffers.after, b.before || 0) * 60_000 &&
+        Date.parse(b.end) >
+          from - Math.max(buffers.before, b.after || 0) * 60_000,
+    );
+  }
+  function dayCount(u, e, start, exclude = null) {
+    const day = DateTime.fromISO(start).setZone(u.timezone).startOf("day");
+    // A pending reschedule occupies both days until its outcome is known, but
+    // the original and reservation count only once when they share a day.
+    return get(
+      "SELECT COUNT(DISTINCT COALESCE(parent_id,id)) AS n FROM bookings WHERE user_id=? AND event_id=? AND status IN ('scheduled','pending') AND id<>? AND COALESCE(parent_id,id)<>? AND start>=? AND start<?",
+      u.id,
+      e.id,
+      exclude?.id || "",
+      exclude?.id || "",
+      day.toUTC().toISO(),
+      day.plus({ days: 1 }).toUTC().toISO(),
+    ).n;
+  }
+  function underDailyLimit(u, e, start, exclude = null) {
+    return (
+      e.daily_limit === null ||
+      dayCount(u, e, start, exclude) < e.daily_limit
+    );
+  }
+  function assertReservationAvailable(u, e, start, end, exclude = null) {
+    // Called inside BEGIN IMMEDIATE, after provider I/O and before reserving.
+    // Reject stale settings rather than booking with a mixture of old/new rules.
+    const freshUser = get("SELECT * FROM users WHERE id=?", u.id),
+      freshEvent = get("SELECT * FROM event_types WHERE id=?", e.id);
+    need(
+      JSON.stringify(freshEvent) === JSON.stringify(e) &&
+        [
+          "windows",
+          "overrides",
+          "timezone",
+          "buffer",
+          "notice",
+          "horizon",
+          "active",
+          "onboarded",
+          "google_refresh",
+        ].every((key) => freshUser[key] === u[key]),
+      409,
+      "The host's scheduling settings changed. Please refresh and choose a time.",
+    );
+    need(
+      candidateSlots(
+        u,
+        e,
+        DateTime.fromISO(start).setZone(u.timezone).toISODate(),
+        u.timezone,
+      ).includes(start),
+      409,
+      "That time is no longer available. Please choose another time.",
+    );
+    need(
+      underDailyLimit(u, e, start, exclude),
+      409,
+      "This event's daily booking limit has been reached. Please choose another day.",
+    );
+    const occupied = all(
+      "SELECT start,end,buffer_before,buffer_after FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND id<>? AND start<? AND end>?",
+      u.id,
+      exclude?.id || "",
+      DateTime.fromISO(end).plus({ minutes: 120 }).toUTC().toISO(),
+      DateTime.fromISO(start).minus({ minutes: 120 }).toUTC().toISO(),
+    ).map((b) => ({ ...b, ...bookingBuffers(u, b) }));
+    need(
+      !overlaps(start, end, eventBuffers(u, e), occupied),
+      409,
+      "That time was just booked. Please choose another time.",
+    );
+  }
   function candidateSlots(u, e, date, zone) {
     const day = DateTime.fromISO(date, { zone });
     need(
@@ -1516,69 +1666,90 @@ export function createApp(options = {}) {
       const override = JSON.parse(u.overrides).find(
         (o) => o.date === hostDay.toISODate(),
       );
-      for (const w of override
+      const overall = override
         ? override.windows
-        : windows.filter((w) => w.day === hostDay.weekday)) {
+        : windows.filter((w) => w.day === hostDay.weekday);
+      const eventWindows =
+        e.windows === null ? null : JSON.parse(e.windows);
+      const effective =
+        eventWindows === null
+          ? overall
+          : overall.flatMap((a) =>
+              eventWindows
+                .filter((b) => b.day === hostDay.weekday)
+                .map((b) => ({
+                  start: a.start > b.start ? a.start : b.start,
+                  end: a.end < b.end ? a.end : b.end,
+                }))
+                .filter((w) => w.start < w.end),
+            );
+      for (const w of effective) {
         const [h, m] = w.start.split(":").map(Number),
           [eh, em] = w.end.split(":").map(Number);
-        let first = hostDay.set({
-            hour: h,
-            minute: m,
-            second: 0,
-            millisecond: 0,
-          }),
-          last = hostDay.set({
-            hour: eh,
-            minute: em,
+        const startMinute = h * 60 + m,
+          endMinute = eh * 60 + em;
+        const firstMinute =
+          e.slot_alignment === "clock"
+            ? Math.ceil(startMinute / e.slot_interval) * e.slot_interval
+            : startMinute;
+        // Enumerate host wall-clock starts, then resolve both offsets of a repeated
+        // hour. Nonexistent spring-forward starts must never be normalized forward.
+        for (
+          let minute = firstMinute;
+          minute < endMinute;
+          minute += e.slot_interval
+        ) {
+          const wall = hostDay.set({
+            hour: Math.floor(minute / 60),
+            minute: minute % 60,
             second: 0,
             millisecond: 0,
           });
-        first = first
-          .getPossibleOffsets()
-          .sort((a, b) => a.toMillis() - b.toMillis())[0];
-        last = last
-          .getPossibleOffsets()
-          .sort((a, b) => b.toMillis() - a.toMillis())[0];
-        for (
-          let t = first;
-          t.plus({ minutes: e.duration }) <= last;
-          t = t.plus({ minutes: 15 })
-        ) {
-          const end = t.plus({ minutes: e.duration });
-          if (
-            t.toFormat("HH:mm") < w.start ||
-            t.toFormat("HH:mm") >= w.end ||
-            end.toFormat("HH:mm") > w.end ||
-            t.setZone(zone).toISODate() !== date ||
-            t < now.plus({ minutes: u.notice }) ||
-            t > now.plus({ days: u.horizon })
-          )
-            continue;
-          // On a repeated clock hour, endpoints alone can straddle a closed
-          // part of a short working window. Check the intervening wall minutes.
-          if (t.offset !== end.offset) {
-            let fits = true;
-            for (
-              let cursor = t;
-              cursor < end;
-              cursor = cursor.plus({ minutes: 1 })
-            ) {
-              const wall = cursor.toFormat("HH:mm");
-              if (wall < w.start || wall >= w.end) {
-                fits = false;
-                break;
+          if (wall.hour * 60 + wall.minute !== minute) continue;
+          for (const t of wall.getPossibleOffsets()) {
+            const end = t.plus({ minutes: e.duration });
+            if (
+              end.toISODate() !== hostDay.toISODate() ||
+              (t.offset === end.offset && end.toFormat("HH:mm") > w.end) ||
+              t.setZone(zone).toISODate() !== date ||
+              t < now.plus({ minutes: u.notice }) ||
+              t > now.plus({ days: u.horizon })
+            )
+              continue;
+            // On a repeated clock hour, endpoints alone can straddle a closed
+            // part of a short working window. Check the intervening wall minutes.
+            if (t.offset !== end.offset) {
+              let fits = true;
+              for (
+                let cursor = t;
+                cursor < end;
+                cursor = cursor.plus({ minutes: 1 })
+              ) {
+                const wall = cursor.toFormat("HH:mm");
+                if (wall < w.start || wall >= w.end) {
+                  fits = false;
+                  break;
+                }
               }
+              if (!fits) continue;
             }
-            if (!fits) continue;
+            result.push(t.toUTC().toISO());
           }
-          result.push(t.toUTC().toISO());
         }
       }
     }
     return [...new Set(result)].sort();
   }
   async function slots(u, e, date, zone, exclude = null) {
-    const candidates = candidateSlots(u, e, date, zone);
+    const counts = new Map();
+    const hasCapacity = (start) => {
+      if (e.daily_limit === null) return true;
+      const day = DateTime.fromISO(start).setZone(u.timezone).toISODate();
+      if (!counts.has(day))
+        counts.set(day, underDailyLimit(u, e, start, exclude));
+      return counts.get(day);
+    };
+    const candidates = candidateSlots(u, e, date, zone).filter(hasCapacity);
     if (!candidates.length) return [];
     const day = DateTime.fromISO(date, { zone });
     const occupied = await busy(
@@ -1587,16 +1758,20 @@ export function createApp(options = {}) {
       day.endOf("day").plus({ days: 1 }).toUTC().toISO(),
       exclude,
     );
-    return candidates.filter((start) => {
-      const t = DateTime.fromISO(start),
-        from = t.minus({ minutes: u.buffer }).toMillis(),
-        to = t.plus({ minutes: e.duration + u.buffer }).toMillis();
-      return !occupied.some(
-        (b) =>
-          DateTime.fromISO(b.start).toMillis() < to &&
-          DateTime.fromISO(b.end).toMillis() > from,
-      );
-    });
+    counts.clear();
+    return candidates.filter(
+      (start) =>
+        hasCapacity(start) &&
+        !overlaps(
+          start,
+          DateTime.fromISO(start)
+            .plus({ minutes: e.duration })
+            .toUTC()
+            .toISO(),
+          eventBuffers(u, e),
+          occupied,
+        ),
+    );
   }
   app.get("/api/public/:host/:event/dates", (req, res) => {
     const { u, e } = publicEvent(req.params.host, req.params.event),
@@ -1607,10 +1782,20 @@ export function createApp(options = {}) {
       .parse(req.query.month);
     const first = DateTime.fromISO(month + "-01", { zone });
     need(first.isValid, 400, "Choose a valid month.");
-    const dates = [];
+    const dates = [],
+      capacity = new Map();
+    const hasCapacity = (start) => {
+      const hostDate = DateTime.fromISO(start)
+        .setZone(u.timezone)
+        .toISODate();
+      if (!capacity.has(hostDate))
+        capacity.set(hostDate, underDailyLimit(u, e, start));
+      return capacity.get(hostDate);
+    };
     for (let i = 0; i < first.daysInMonth; i++) {
       const date = first.plus({ days: i }).toISODate();
-      if (candidateSlots(u, e, date, zone).length) dates.push(date);
+      if (candidateSlots(u, e, date, zone).some(hasCapacity))
+        dates.push(date);
     }
     res.json({ dates });
   });
@@ -1790,19 +1975,7 @@ export function createApp(options = {}) {
       manage = token();
     db.exec("BEGIN IMMEDIATE");
     try {
-      need(
-        !get(
-          "SELECT id FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND start<? AND end>?",
-          u.id,
-          DateTime.fromISO(end).plus({ minutes: u.buffer }).toUTC().toISO(),
-          DateTime.fromISO(start)
-            .minus({ minutes: u.buffer })
-            .toUTC()
-            .toISO(),
-        ),
-        409,
-        "That time was just booked. Please choose another time.",
-      );
+      assertReservationAvailable(u, e, start, end);
       run(
         "INSERT INTO bookings(id,event_id,user_id,name,email,notes,timezone,start,end,status,manage_hash,title,location,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         id,
@@ -1822,13 +1995,15 @@ export function createApp(options = {}) {
       );
       // Deterministic Google IDs allow reconciliation after a timeout or a process restart.
       run(
-        "UPDATE bookings SET google_id=?,meet_url=?,google_account=?,google_calendar=?,instructions=?,phone=? WHERE id=?",
+        "UPDATE bookings SET google_id=?,meet_url=?,google_account=?,google_calendar=?,instructions=?,phone=?,buffer_before=?,buffer_after=? WHERE id=?",
         id.replaceAll("-", ""),
         e.location === "Zoom" ? e.meeting_url : null,
         accountId(u),
         calendarId(u),
         e.instructions,
         b.phone,
+        eventBuffers(u, e).before,
+        eventBuffers(u, e).after,
         id,
       );
       db.exec("COMMIT");
@@ -2076,23 +2251,7 @@ export function createApp(options = {}) {
       const reservation = randomUUID();
       db.exec("BEGIN IMMEDIATE");
       try {
-        need(
-          !get(
-            "SELECT id FROM bookings WHERE user_id=? AND status IN ('scheduled','pending') AND id<>? AND start<? AND end>?",
-            u.id,
-            old.id,
-            DateTime.fromISO(end)
-              .plus({ minutes: u.buffer })
-              .toUTC()
-              .toISO(),
-            DateTime.fromISO(start)
-              .minus({ minutes: u.buffer })
-              .toUTC()
-              .toISO(),
-          ),
-          409,
-          "That time was just booked. Please choose another time.",
-        );
+        assertReservationAvailable(u, e, start, end, old);
         // Reserve the new slot while retaining the original appointment until Google confirms the update.
         run(
           "INSERT INTO bookings(id,event_id,user_id,name,email,notes,timezone,start,end,status,manage_hash,title,location,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -2112,11 +2271,13 @@ export function createApp(options = {}) {
           new Date().toISOString(),
         );
         run(
-          "UPDATE bookings SET operation='reschedule',parent_id=?,google_id=?,google_account=?,google_calendar=? WHERE id=?",
+          "UPDATE bookings SET operation='reschedule',parent_id=?,google_id=?,google_account=?,google_calendar=?,buffer_before=?,buffer_after=? WHERE id=?",
           old.id,
           old.google_id,
           old.google_account,
           old.google_calendar,
+          eventBuffers(u, e).before,
+          eventBuffers(u, e).after,
           reservation,
         );
         db.exec("COMMIT");
@@ -2139,10 +2300,12 @@ export function createApp(options = {}) {
         db.exec("BEGIN IMMEDIATE");
         try {
           run(
-            "UPDATE bookings SET start=?,end=?,timezone=? WHERE id=?",
+            "UPDATE bookings SET start=?,end=?,timezone=?,buffer_before=?,buffer_after=? WHERE id=?",
             start,
             end,
             input.timezone,
+            eventBuffers(u, e).before,
+            eventBuffers(u, e).after,
             old.id,
           );
           run("DELETE FROM bookings WHERE id=?", reservation);
@@ -2281,10 +2444,12 @@ export function createApp(options = {}) {
         if (b.operation === "reschedule") {
           id = b.parent_id;
           run(
-            "UPDATE bookings SET start=?,end=?,timezone=? WHERE id=?",
+            "UPDATE bookings SET start=?,end=?,timezone=?,buffer_before=?,buffer_after=? WHERE id=?",
             b.start,
             b.end,
             b.timezone,
+            b.buffer_before,
+            b.buffer_after,
             id,
           );
           run("DELETE FROM bookings WHERE id=?", b.id);

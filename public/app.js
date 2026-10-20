@@ -564,7 +564,7 @@ function availabilityView() {
     "availability",
     heading(
       "Make time on your terms",
-      "Set your working hours. We’ll take care of the rest.",
+      "Set your overall hours. Each event can use these hours or narrow them further.",
     ) +
       `<form id="availability-form"><div class="settings-grid"><section class="panel"><div class="panel-head"><h2>Weekly availability</h2><span class="pill">Repeats every week</span></div><div class="panel-body"><div class="form-group"><label for="timezone">Your time zone</label><select name="timezone" id="timezone">${zoneOptions(u.timezone)}</select><small>Your guests see available times in their own time zone.</small></div>${[
         "Monday",
@@ -581,7 +581,7 @@ function availabilityView() {
         })
         .join(
           "",
-        )}<h3>Holidays and date overrides</h3><p class="small muted">These replace the weekly hours for that date in your time zone. Leave hours blank to close a holiday.</p><div id="date-overrides">${(u.overrides || []).map(overrideEditor).join("")}</div><button type="button" class="btn secondary" id="add-override">Add date override</button></div></section><section class="panel"><div class="panel-head"><h2>A little breathing room</h2></div><div class="panel-body"><div class="form-group"><label for="buffer">Buffer around meetings</label><select id="buffer" name="buffer">${[0, 5, 10, 15, 20, 30, 45, 60, 90, 120].map((n) => `<option value="${n}" ${n === u.buffer ? "selected" : ""}>${n === 0 ? "No buffer" : n + " minutes"}</option>`).join("")}</select><small>Keep space before and after appointments.</small></div><div class="form-group"><label for="notice">Minimum booking notice</label><select id="notice" name="notice">${[
+        )}<h3>Holidays and date overrides</h3><p class="small muted">These replace the weekly hours for that date in your time zone. Leave hours blank to close a holiday.</p><div id="date-overrides">${(u.overrides || []).map(overrideEditor).join("")}</div><button type="button" class="btn secondary" id="add-override">Add date override</button></div></section><section class="panel"><div class="panel-head"><h2>A little breathing room</h2></div><div class="panel-body"><div class="form-group"><label for="buffer">Default buffer around meetings</label><select id="buffer" name="buffer">${[0, 5, 10, 15, 20, 30, 45, 60, 90, 120].map((n) => `<option value="${n}" ${n === u.buffer ? "selected" : ""}>${n === 0 ? "No buffer" : n + " minutes"}</option>`).join("")}</select><small>The default before and after buffer. Override either side when creating or editing an event type.</small></div><div class="form-group"><label for="notice">Minimum booking notice</label><select id="notice" name="notice">${[
         [0, "No minimum"],
         [30, "30 minutes"],
         [60, "1 hour"],
@@ -788,6 +788,49 @@ function settingsView() {
     });
   };
 }
+function eventSchedulingFields(v) {
+  const days = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+  ];
+  const windows =
+    v.windows == null ? state.user.windows : JSON.parse(v.windows);
+  const bufferOptions = (value) =>
+    `<option value="" ${value == null ? "selected" : ""}>Use overall default (${state.user.buffer} min)</option>${[
+      ...new Set([
+        0,
+        5,
+        10,
+        15,
+        20,
+        30,
+        45,
+        60,
+        90,
+        120,
+        ...(value == null ? [] : [value]),
+      ]),
+    ]
+      .sort((a, b) => a - b)
+      .map(
+        (n) =>
+          `<option value="${n}" ${value === n ? "selected" : ""}>${n} minutes</option>`,
+      )
+      .join("")}`;
+  return `<section class="event-scheduling" aria-label="Event scheduling"><h3>Availability for this event</h3><div class="form-group"><label for="event-availability">Event availability</label><select id="event-availability" name="availabilityMode" aria-describedby="event-hours-help"><option value="inherit" ${v.windows == null ? "selected" : ""}>Use overall availability</option><option value="custom" ${v.windows != null ? "selected" : ""}>Set weekly hours for this event</option></select><small id="event-hours-help">Your overall Availability sets the outer limits. Event hours only narrow it. Holidays and date overrides still apply. All hours use ${e(state.user.timezone)}.</small></div><fieldset id="event-weekly-hours" ${v.windows == null ? "hidden disabled" : ""}><legend>Weekly hours for this event</legend>${days
+    .map((day, i) => {
+      const ranges = windows.filter((w) => w.day === i + 1);
+      return `<div class="availability-day"><label><input type="checkbox" name="event-day-${i + 1}" ${ranges.length ? "checked" : ""}>${day}</label><div data-event-ranges="${i + 1}">${(ranges.length ? ranges : [{ start: "09:00", end: "17:00" }]).map((w) => rangeEditor(i + 1, "Event " + day, w.start, w.end)).join("")}</div><button type="button" class="btn ghost" data-event-add-range="${i + 1}" data-label="Event ${day}">Add ${day} hours</button></div>`;
+    })
+    .join(
+      "",
+    )}<p class="small muted">Unchecked days are closed for this event. You can add multiple time ranges per day.</p></fieldset><h3>Time between meetings</h3><p class="small muted" id="event-buffer-help">Buffers leave space before and after meetings; they do not set start times. A gap can satisfy both neighboring meetings’ buffers. Saved bookings keep their buffers; rescheduling uses the current event settings.</p><div class="form-row"><div class="form-group"><label for="event-buffer-before">Buffer before</label><select id="event-buffer-before" name="bufferBefore" aria-describedby="event-buffer-help">${bufferOptions(v.buffer_before)}</select></div><div class="form-group"><label for="event-buffer-after">Buffer after</label><select id="event-buffer-after" name="bufferAfter" aria-describedby="event-buffer-help">${bufferOptions(v.buffer_after)}</select></div></div><h3>When meetings can start</h3><div class="form-row"><div class="form-group"><label for="event-slot-interval">Start-time interval</label><select id="event-slot-interval" name="slotInterval" aria-describedby="event-start-help">${[5, 10, 15, 20, 30, 60, 90, 120].map((n) => `<option value="${n}" ${n === (v.slot_interval ?? 15) ? "selected" : ""}>Every ${n} minutes</option>`).join("")}</select></div><div class="form-group"><label for="event-slot-alignment">Start-time alignment</label><select id="event-slot-alignment" name="slotAlignment" aria-describedby="event-start-help"><option value="window" ${(v.slot_alignment ?? "window") === "window" ? "selected" : ""}>From each available window’s start</option><option value="clock" ${v.slot_alignment === "clock" ? "selected" : ""}>Align to the clock</option></select></div></div><p class="small muted" id="event-start-help">For on-the-hour starts, choose every 60 minutes and align to the clock. Every 30 minutes gives :00 and :30. Window alignment starts at the first minute shared by your overall and event hours. Clock alignment counts from midnight in your time zone.</p><div class="form-group"><label for="event-daily-limit">Maximum bookings per day</label><input id="event-daily-limit" name="dailyLimit" type="number" min="1" max="1000" step="1" value="${v.daily_limit ?? ""}" placeholder="Unlimited" aria-describedby="event-limit-help"><small id="event-limit-help">Leave blank for unlimited. Counts active bookings of this event type by their start date in ${e(state.user.timezone)}. Pending requests count; canceled bookings do not. Existing bookings are kept when you lower the limit.</small></div></section>`;
+}
 function eventModal(id) {
   const v = state.events.find((v) => v.id === id) || {
     title: "",
@@ -799,7 +842,7 @@ function eventModal(id) {
   };
   modal(
     id ? "Edit event type" : "Create an event type",
-    `<form id="event-form"><div class="form-group"><label for="event-title">What’s the occasion?</label><input name="title" id="event-title" value="${e(v.title)}" placeholder="e.g. Tax strategy call" required minlength="2" maxlength="80"></div><div class="form-row"><div class="form-group"><label for="event-duration">Duration</label><select id="event-duration" name="duration">${[15, 30, 45, 60, 75, 90, 120, 150, 180, 240].map((n) => `<option value="${n}" ${n === v.duration ? "selected" : ""}>${n} minutes</option>`).join("")}</select></div><div class="form-group"><label for="event-location">Where</label><select id="event-location" name="location">${["Google Meet", "Zoom", "Phone call", "In person"].map((l) => `<option ${l === v.location ? "selected" : ""}>${l}</option>`).join("")}</select></div></div><div id="zoom-link-field" class="form-group" ${v.location === "Zoom" ? "" : "hidden"}><label for="event-zoom-link">Zoom meeting link</label><input type="url" id="event-zoom-link" name="meetingUrl" value="${e(v.meeting_url || "")}" placeholder="https://us02web.zoom.us/j/1234567890" ${v.location === "Zoom" ? "required" : "disabled"}><small>Paste an existing Zoom meeting link. It will be included in calendar invitations and confirmation emails. A new Zoom room is not created automatically.</small></div><div class="form-group"><label for="event-instructions">Calling instructions or meeting address</label><textarea id="event-instructions" name="instructions" maxlength="1000" placeholder="For phone calls, say who calls whom. For in-person meetings, include the address and arrival details.">${e(v.instructions || "")}</textarea><small>Required for phone and in-person appointments. Shown to guests and included in invitations.</small></div><div class="form-group"><label for="event-description">A little about this meeting</label><textarea name="description" id="event-description" placeholder="Let guests know what to expect…" maxlength="2000">${e(v.description)}</textarea></div><div class="form-group"><label>Event color</label><div class="color-options">${[
+    `<form id="event-form"><div class="form-group"><label for="event-title">What’s the occasion?</label><input name="title" id="event-title" value="${e(v.title)}" placeholder="e.g. Tax strategy call" required minlength="2" maxlength="80"></div><div class="form-row"><div class="form-group"><label for="event-duration">Duration</label><select id="event-duration" name="duration">${[15, 30, 45, 60, 75, 90, 120, 150, 180, 240].map((n) => `<option value="${n}" ${n === v.duration ? "selected" : ""}>${n} minutes</option>`).join("")}</select></div><div class="form-group"><label for="event-location">Where</label><select id="event-location" name="location">${["Google Meet", "Zoom", "Phone call", "In person"].map((l) => `<option ${l === v.location ? "selected" : ""}>${l}</option>`).join("")}</select></div></div><div id="zoom-link-field" class="form-group" ${v.location === "Zoom" ? "" : "hidden"}><label for="event-zoom-link">Zoom meeting link</label><input type="url" id="event-zoom-link" name="meetingUrl" value="${e(v.meeting_url || "")}" placeholder="https://us02web.zoom.us/j/1234567890" ${v.location === "Zoom" ? "required" : "disabled"}><small>Paste an existing Zoom meeting link. It will be included in calendar invitations and confirmation emails. A new Zoom room is not created automatically.</small></div><div class="form-group"><label for="event-instructions">Calling instructions or meeting address</label><textarea id="event-instructions" name="instructions" maxlength="1000" placeholder="For phone calls, say who calls whom. For in-person meetings, include the address and arrival details.">${e(v.instructions || "")}</textarea><small>Required for phone and in-person appointments. Shown to guests and included in invitations.</small></div><div class="form-group"><label for="event-description">A little about this meeting</label><textarea name="description" id="event-description" placeholder="Let guests know what to expect…" maxlength="2000">${e(v.description)}</textarea></div>${eventSchedulingFields(v)}<div class="form-group"><label>Event color</label><div class="color-options">${[
       ["#6366f1", "purple"],
       ["#10b981", "green"],
       ["#f59e0b", "amber"],
@@ -820,6 +863,38 @@ function eventModal(id) {
     $("#event-zoom-link").required = zoom;
     $("#event-zoom-link").disabled = !zoom;
   };
+  const hours = $("#event-weekly-hours");
+  const syncEventHours = () => {
+    hours.hidden = $("#event-availability").value !== "custom";
+    hours.disabled = hours.hidden;
+    for (const row of hours.querySelectorAll(".hours-range")) {
+      const enabled = hours.querySelector(
+        `[name="event-day-${row.dataset.day}"]`,
+      ).checked;
+      row.querySelectorAll("input").forEach((input) => {
+        input.disabled = !enabled;
+      });
+    }
+  };
+  $("#event-availability").onchange = syncEventHours;
+  hours.onchange = syncEventHours;
+  hours.onclick = (event) => {
+    const button = event.target.closest("button");
+    if (button?.hasAttribute("data-event-add-range")) {
+      const day = button.dataset.eventAddRange;
+      hours
+        .querySelector(`[data-event-ranges="${day}"]`)
+        .insertAdjacentHTML(
+          "beforeend",
+          rangeEditor(day, button.dataset.label, "13:00", "17:00"),
+        );
+      hours.querySelector(`[name="event-day-${day}"]`).checked = true;
+      syncEventHours();
+    }
+    if (button?.hasAttribute("data-remove-range"))
+      button.closest(".hours-range").remove();
+  };
+  syncEventHours();
   $("#event-form").onsubmit = (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -828,6 +903,28 @@ function eventModal(id) {
       await api("/api/events" + (id ? "/" + id : ""), {
         method: id ? "PATCH" : "POST",
         body: {
+          windows:
+            f.get("availabilityMode") === "inherit"
+              ? null
+              : [...hours.querySelectorAll(".hours-range")]
+                  .filter((row) => f.has("event-day-" + row.dataset.day))
+                  .map((row) => ({
+                    day: Number(row.dataset.day),
+                    start: row.querySelector("[data-start]").value,
+                    end: row.querySelector("[data-end]").value,
+                  })),
+          bufferBefore:
+            f.get("bufferBefore") === ""
+              ? null
+              : Number(f.get("bufferBefore")),
+          bufferAfter:
+            f.get("bufferAfter") === ""
+              ? null
+              : Number(f.get("bufferAfter")),
+          slotInterval: Number(f.get("slotInterval")),
+          slotAlignment: f.get("slotAlignment"),
+          dailyLimit:
+            f.get("dailyLimit") === "" ? null : Number(f.get("dailyLimit")),
           title: f.get("title"),
           duration: Number(f.get("duration")),
           description: f.get("description"),
