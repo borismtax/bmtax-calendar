@@ -81,7 +81,7 @@ The first administrator signs up at `/signup`; other team accounts must use an e
 
 This repository includes a Dockerfile and a Render Blueprint (`render.yaml`) for one always-on web instance with a persistent disk. There is no production deployment created by merely adding these files.
 
-On Render, connect this GitHub repository, use its Blueprint, supply the requested secure variables, and set `APP_URL` to the final HTTPS domain. If a custom domain is added later, update `APP_URL` and the Google callback URI together. The service uses a paid persistent disk; confirm current hosting pricing in the provider before provisioning.
+On Render, connect this GitHub repository, use its Blueprint, and supply `RESEND_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` in Render’s secure settings. The app automatically uses Render’s assigned `RENDER_EXTERNAL_URL`; you do not need to guess an address or set `APP_URL` for the initial deployment. Render generates and retains a private `TOKEN_ENCRYPTION_SECRET`, from which the app derives its encryption key. Do not rotate or remove that secret during routine deployments. Explicit `TOKEN_ENCRYPTION_KEY` values remain supported for other hosts. If a custom domain is added later, update `APP_URL` and the Google callback URI together. The service uses a paid persistent disk; confirm current hosting pricing in the provider before provisioning.
 
 For another Docker-capable host:
 

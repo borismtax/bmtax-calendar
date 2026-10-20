@@ -20,15 +20,13 @@ services:
         value: accounting@borismtax.com
       - key: MAIL_FROM
         value: BMT Calendar <scheduling@mail.borismtax.com>
-      - key: APP_URL
-        sync: false
       - key: RESEND_API_KEY
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
-      - key: TOKEN_ENCRYPTION_KEY
-        sync: false
+      - key: TOKEN_ENCRYPTION_SECRET
+        generateValue: true
       - key: TRUST_PROXY_HOPS
         value: "1"

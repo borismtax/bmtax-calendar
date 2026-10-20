@@ -73,7 +73,10 @@ const need = (condition, status, message) => {
 export function createApp(options = {}) {
   const config = {
     port: Number(process.env.PORT || 3000),
-    baseUrl: process.env.APP_URL || "http://localhost:3000",
+    baseUrl:
+      process.env.APP_URL ||
+      process.env.RENDER_EXTERNAL_URL ||
+      "http://localhost:3000",
     dbPath: process.env.DATABASE_PATH || resolve(root, "data/calendar.sqlite"),
     production: process.env.NODE_ENV === "production",
     ownerEmail: (process.env.OWNER_EMAIL || "").toLowerCase(),
@@ -81,10 +84,22 @@ export function createApp(options = {}) {
     mailFrom: process.env.MAIL_FROM,
     googleId: process.env.GOOGLE_CLIENT_ID,
     googleSecret: process.env.GOOGLE_CLIENT_SECRET,
-    encryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
+    encryptionKey:
+      process.env.TOKEN_ENCRYPTION_KEY ||
+      (process.env.TOKEN_ENCRYPTION_SECRET
+        ? hash(process.env.TOKEN_ENCRYPTION_SECRET)
+        : undefined),
     demo: process.env.DEMO_MODE === "true",
     ...options,
   };
+  // Render generates a high-entropy secret once and retains it across deployments.
+  // Preserve support for existing explicit 64-hex encryption keys.
+  if (!process.env.TOKEN_ENCRYPTION_KEY && process.env.TOKEN_ENCRYPTION_SECRET)
+    need(
+      process.env.TOKEN_ENCRYPTION_SECRET.length >= 32,
+      500,
+      "TOKEN_ENCRYPTION_SECRET must contain at least 32 random characters.",
+    );
   config.baseUrl = config.baseUrl.replace(/\/$/, "");
   need(
     new URL(config.baseUrl).origin === config.baseUrl,

@@ -624,3 +624,37 @@ test("an ambiguous rescheduling request can be reconciled without duplicating th
     s.slots[8],
   );
 });
+
+test("Render production startup uses its assigned URL and retained generated secret", async () => {
+  const names = ["APP_URL", "RENDER_EXTERNAL_URL", "TOKEN_ENCRYPTION_KEY", "TOKEN_ENCRYPTION_SECRET"];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  let service;
+  try {
+    delete process.env.APP_URL;
+    delete process.env.TOKEN_ENCRYPTION_KEY;
+    process.env.RENDER_EXTERNAL_URL = "https://assigned-calendar.onrender.com";
+    process.env.TOKEN_ENCRYPTION_SECRET = "test-generated-secret-with-at-least-32-characters";
+    const settings = { dbPath: ":memory:", production: true, demo: false, ownerEmail: "owner@example.com", resendKey: "test-only", mailFrom: "test@example.com", googleId: "test-id", googleSecret: "test-secret" };
+    service = createApp(settings);
+    assert.equal(service.config.baseUrl, "https://assigned-calendar.onrender.com");
+    assert.match(service.config.encryptionKey, /^[a-f0-9]{64}$/);
+    const stableKey = service.config.encryptionKey;
+    await supertest(service.app).get("/api/health").expect(200);
+    service.close();
+    service = createApp(settings);
+    assert.equal(service.config.encryptionKey, stableKey);
+    service.close();
+    service = null;
+    process.env.APP_URL = "https://calendar.example.com";
+    process.env.TOKEN_ENCRYPTION_KEY = "a".repeat(64);
+    service = createApp(settings);
+    assert.equal(service.config.baseUrl, "https://calendar.example.com");
+    assert.equal(service.config.encryptionKey, "a".repeat(64));
+  } finally {
+    service?.close();
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
