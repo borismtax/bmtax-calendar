@@ -5,7 +5,7 @@ COPY package.json package-lock.json ./
 RUN --mount=type=secret,id=proxy_ca \
     if [ -f /run/secrets/proxy_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; \
     npm ci --omit=dev --fetch-timeout=30000 --fetch-retries=2 && mkdir /data && chown node:node /data
-COPY --chown=node:node server.js ./
+COPY --chown=node:node server.js google-diagnostics.js ./
 COPY --chown=node:node public ./public
 USER node
 EXPOSE 3000

@@ -1565,7 +1565,20 @@ test("disabled Google Calendar API is diagnosed and slots recover once it is ena
         })
       : Response.json(
           {
-            error: { code: 403, details: [{ reason: "SERVICE_DISABLED" }] },
+            error: {
+              code: 403,
+              details: [
+                {
+                  "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                  domain: "googleapis.com",
+                  reason: "SERVICE_DISABLED",
+                  metadata: {
+                    service: "calendar-json.googleapis.com",
+                    consumer: "projects/123456789",
+                  },
+                },
+              ],
+            },
           },
           { status: 403 },
         );
@@ -1574,7 +1587,11 @@ test("disabled Google Calendar API is diagnosed and slots recover once it is ena
     .get(s.path + "/slots")
     .query({ date: s.day, timezone: "America/New_York" })
     .expect(502);
-  assert.match(failed.body.error, /Google Calendar API is not enabled/);
+  assert.match(
+    failed.body.error,
+    /Google Calendar could not confirm availability/,
+  );
+  assert.equal(JSON.stringify(failed.body).includes("123456789"), false);
   assert.equal(
     failed.body.slots,
     undefined,
@@ -1582,6 +1599,11 @@ test("disabled Google Calendar API is diagnosed and slots recover once it is ena
   );
   const diagnostic = await s.agent.get("/api/google/status").expect(200);
   assert.equal(diagnostic.body.code, "API_DISABLED");
+  assert.equal(diagnostic.body.diagnostics.consumer, "projects/123456789");
+  assert.equal(
+    diagnostic.body.enablementUrl,
+    "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com?project=123456789",
+  );
   s.db
     .prepare("UPDATE users SET onboarded=0,photo=? WHERE id=?")
     .run("test-photo", s.user.id);
@@ -1605,6 +1627,191 @@ test("disabled Google Calendar API is diagnosed and slots recover once it is ena
     ).body.slots.length > 0,
   );
   await s.agent.post("/api/me/onboarding").send({}).expect(200);
+});
+
+test("Google diagnostics are private to the connected host and never expose provider bodies publicly or in logs", async (t) => {
+  const s = await setup(t, {
+    googleId: "test-id",
+    googleSecret: "test-secret",
+    encryptionKey: "1".repeat(64),
+  });
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => warnings.push(args));
+  let calls = 0;
+  await connectGoogleWithResponses(s, t, async () => {
+    calls++;
+    return Response.json(
+      {
+        error: {
+          message: "PRIVATE_BODY client-secret calendar@example.com",
+          details: [
+            {
+              "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+              domain: "googleapis.com",
+              reason: "SERVICE_DISABLED",
+              metadata: {
+                service: "calendar-json.googleapis.com",
+                consumer: "projects/123456789",
+                access_token: "PRIVATE_TOKEN",
+                client_secret: "PRIVATE_SECRET",
+              },
+            },
+          ],
+        },
+      },
+      { status: 403 },
+    );
+  });
+  await s.anon.get("/api/google/status").expect(401);
+  assert.equal(calls, 0);
+  const own = await s.agent.get("/api/google/status").expect(200);
+  assert.equal(own.headers["cache-control"], "no-store");
+  assert.equal(own.body.diagnostics.consumer, "projects/123456789");
+  assert.equal(
+    own.body.enablementUrl,
+    "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com?project=123456789",
+  );
+  assert.ok(!JSON.stringify(own.body).includes("PRIVATE_"));
+  await s.agent
+    .post("/api/team/invite")
+    .send({ email: "other@example.com" })
+    .expect(200);
+  const invite = s.mail
+    .find((m) => m.subject.includes("invited"))
+    .html.match(/invite=([a-f0-9]+)/)[1];
+  const other = supertest.agent(s.app);
+  await other
+    .post("/api/auth/register")
+    .send({
+      name: "Other Host",
+      email: "other@example.com",
+      password,
+      invite,
+    })
+    .expect(201);
+  const verify = s.mail
+    .filter((m) => m.subject.includes("Verify"))
+    .at(-1)
+    .html.match(/verify\?token=([a-f0-9]+)/)[1];
+  await other.post("/api/auth/verify").send({ token: verify }).expect(200);
+  const countBeforeOther = calls;
+  const otherStatus = await other
+    .get("/api/google/status")
+    .query({ userId: s.user.id, host: s.user.slug })
+    .expect(200);
+  assert.equal(otherStatus.body.code, "NOT_CONNECTED");
+  assert.equal(otherStatus.body.diagnostics, undefined);
+  assert.equal(
+    calls,
+    countBeforeOther,
+    "A host cannot select another host's diagnostic through query parameters",
+  );
+  const slots = await s.anon
+    .get(s.path + "/slots")
+    .query({ date: s.day, timezone: "America/New_York" })
+    .expect(502);
+  const booking = await s.anon
+    .post(s.path + "/bookings")
+    .send(guest(s.slots[0]))
+    .expect(502);
+  for (const response of [slots, booking]) {
+    assert.deepEqual(Object.keys(response.body), ["error"]);
+    assert.match(response.body.error, /could not confirm availability/);
+    for (const value of [
+      "PRIVATE_",
+      "123456789",
+      "SERVICE_DISABLED",
+      "client-secret",
+      "calendar@example.com",
+    ])
+      assert.ok(!JSON.stringify(response.body).includes(value));
+  }
+  assert.ok(warnings.length >= 3);
+  for (const [message, fields] of warnings) {
+    assert.equal(message, "Google Calendar request failed");
+    assert.deepEqual(fields, { status: 403, code: "API_DISABLED" });
+  }
+  s.db.prepare("UPDATE users SET active=0 WHERE id=?").run(s.user.id);
+  await s.agent.get("/api/google/status").expect(401);
+});
+
+test("connection checks distinguish refresh rejection from client configuration and transient token failures", async (t) => {
+  const s = await setup(t, {
+    googleId: "test-id",
+    googleSecret: "test-secret",
+    encryptionKey: "1".repeat(64),
+  });
+  await connectGoogleWithResponses(s, t, async () =>
+    Response.json({ calendars: { "calendar@example.com": { busy: [] } } }),
+  );
+  const storedRefresh = s.db
+    .prepare("SELECT google_refresh FROM users WHERE id=?")
+    .get(s.user.id).google_refresh;
+  for (const [reason, status, code] of [
+    ["invalid_grant", 400, "RECONNECT_REQUIRED"],
+    ["invalid_client", 401, "OAUTH_CONFIGURATION"],
+    ["server_error", 500, "GOOGLE_UNAVAILABLE"],
+  ]) {
+    t.mock.method(globalThis, "fetch", async (input) => {
+      assert.equal(String(input), "https://oauth2.googleapis.com/token");
+      return Response.json(
+        { error: reason, error_description: "PRIVATE_TOKEN_DETAILS" },
+        { status },
+      );
+    });
+    const result = await s.agent.get("/api/google/status").expect(200);
+    assert.equal(result.body.code, code);
+    assert.equal(result.body.diagnostics.reason, reason);
+    assert.equal(result.body.enablementUrl, undefined);
+    assert.ok(
+      !JSON.stringify(result.body).includes("PRIVATE_TOKEN_DETAILS"),
+    );
+  }
+  t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("PRIVATE_NETWORK_DETAILS");
+  });
+  const network = await s.agent.get("/api/google/status").expect(200);
+  assert.equal(network.body.code, "GOOGLE_UNAVAILABLE");
+  assert.deepEqual(network.body.diagnostics, {});
+  assert.equal(
+    s.db
+      .prepare("SELECT google_refresh FROM users WHERE id=?")
+      .get(s.user.id).google_refresh,
+    storedRefresh,
+    "Diagnostics never modify credentials",
+  );
+});
+
+test("an HTTP-success free/busy response with a calendar error is diagnosed without leaking calendar identifiers", async (t) => {
+  const s = await setup(t, {
+    googleId: "test-id",
+    googleSecret: "test-secret",
+    encryptionKey: "1".repeat(64),
+  });
+  await connectGoogleWithResponses(s, t, async () =>
+    Response.json({
+      calendars: {
+        "calendar@example.com": {
+          errors: [
+            {
+              domain: "global",
+              reason: "notFound",
+              message: "PRIVATE_CALENDAR",
+            },
+          ],
+        },
+      },
+    }),
+  );
+  const result = await s.agent.get("/api/google/status").expect(200);
+  assert.equal(result.body.code, "CALENDAR_UNAVAILABLE");
+  assert.deepEqual(result.body.diagnostics, {
+    reason: "notFound",
+    domain: "global",
+  });
+  assert.equal(result.body.enablementUrl, undefined);
+  assert.ok(!JSON.stringify(result.body).includes("calendar@example.com"));
+  assert.ok(!JSON.stringify(result.body).includes("PRIVATE_CALENDAR"));
 });
 
 test("Zoom calendar invitations use the Zoom URL without creating Google Meet rooms", async (t) => {

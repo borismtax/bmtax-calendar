@@ -17,6 +17,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DateTime } from "luxon";
 import { z } from "zod";
+import {
+  calendarDiagnostic,
+  oauthDiagnostic,
+  publicCalendarError,
+  safeOAuthReason,
+} from "./google-diagnostics.js";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const token = () => randomBytes(32).toString("hex");
@@ -356,40 +362,19 @@ export function createApp(options = {}) {
         "An external service is unavailable. Please try again shortly.",
       );
       error.providerStatus = response.status;
-      const reason =
-        data.error?.details?.find((detail) => detail.reason)?.reason ||
-        data.error?.errors?.[0]?.reason ||
-        "";
       if (url.startsWith("https://www.googleapis.com/calendar/")) {
-        if (
-          [
-            "SERVICE_DISABLED",
-            "accessNotConfigured",
-            "API_DISABLED",
-          ].includes(reason) ||
-          /has not been used|is disabled/i.test(data.error?.message || "")
-        ) {
-          error.message =
-            "Google Calendar API is not enabled for the host’s Google Cloud project. The host needs to enable it and try again.";
-          error.calendarCode = "API_DISABLED";
-        } else if (response.status === 401 || response.status === 403) {
-          error.message =
-            "Google denied calendar access. The host should reconnect Google Calendar in Settings and approve both calendar permissions.";
-          error.calendarCode = "ACCESS_DENIED";
-        } else if (response.status === 429) {
-          error.message =
-            "Google Calendar is receiving too many requests. Please try again in a few minutes.";
-          error.calendarCode = "RATE_LIMITED";
-        } else {
-          error.message =
-            "Google Calendar could not check availability right now. Please try again shortly.";
-          error.calendarCode = "GOOGLE_UNAVAILABLE";
-        }
+        error.message = publicCalendarError;
+        error.calendarDiagnostic = calendarDiagnostic(
+          response.status,
+          data,
+        );
         console.warn("Google Calendar request failed", {
           status: response.status,
-          code: error.calendarCode,
+          code: error.calendarDiagnostic.code,
         });
       }
+      if (url === "https://oauth2.googleapis.com/token")
+        error.oauthReason = safeOAuthReason(data.error);
       throw error;
     }
     return data;
@@ -1299,11 +1284,13 @@ export function createApp(options = {}) {
         }),
       });
       return data.access_token;
-    } catch {
-      throw new HttpError(
-        503,
-        "Google Calendar needs attention. The host should reconnect their calendar in Settings.",
+    } catch (cause) {
+      const error = new HttpError(503, publicCalendarError);
+      error.calendarDiagnostic = oauthDiagnostic(
+        cause.providerStatus,
+        cause.oauthReason,
       );
+      throw error;
     }
   }
   async function google(user, path, method = "GET", body) {
@@ -1507,12 +1494,16 @@ export function createApp(options = {}) {
       timeMax: end,
       items: [{ id }],
     });
-    need(
-      !data.calendars?.[id]?.errors?.length &&
-        Array.isArray(data.calendars?.[id]?.busy),
-      503,
-      "Calendar availability could not be checked. Please try again later.",
-    );
+    if (
+      data.calendars?.[id]?.errors?.length ||
+      !Array.isArray(data.calendars?.[id]?.busy)
+    ) {
+      const error = new HttpError(503, publicCalendarError);
+      error.calendarDiagnostic = calendarDiagnostic(200, {
+        error: { errors: data.calendars?.[id]?.errors },
+      });
+      throw error;
+    }
     return [...local, ...data.calendars[id].busy];
   }
   app.get("/api/google/status", auth, async (req, res) => {
@@ -1531,12 +1522,11 @@ export function createApp(options = {}) {
         message: "Google Calendar availability is working.",
       });
     } catch (error) {
+      const diagnostic =
+        error.calendarDiagnostic || calendarDiagnostic(503, {});
       res.json({
         healthy: false,
-        code: error.calendarCode || "RECONNECT_REQUIRED",
-        message: error.status
-          ? error.message
-          : "Google Calendar could not be reached. Please try again shortly.",
+        ...diagnostic,
       });
     }
   });
