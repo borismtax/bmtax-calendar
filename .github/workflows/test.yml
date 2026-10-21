@@ -17,6 +17,26 @@ jobs:
       - run: npm test
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+      - name: Build production image and verify isolated startup
+        run: |
+          docker build -t bmt-calendar:ci .
+          docker run --rm -i --network none --entrypoint node bmt-calendar:ci --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { once } from "node:events";
+          import { createApp } from "./server.js";
+          const service = createApp({ dbPath: ":memory:", production: false, demo: false, testMode: true });
+          const server = service.app.listen(0, "127.0.0.1");
+          try {
+            await once(server, "listening");
+            const response = await fetch(`http://127.0.0.1:${server.address().port}/api/health`);
+            assert.equal(response.status, 200);
+            assert.equal((await response.json()).status, "ok");
+            console.log("Production image startup and health passed with no external network or credentials.");
+          } finally {
+            await new Promise((resolve) => server.close(resolve));
+            service.close();
+          }
+          NODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
