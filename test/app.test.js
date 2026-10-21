@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import supertest from "supertest";
 import { DateTime, Settings } from "luxon";
 import { createApp } from "../server.js";
+import { googleClientFingerprint } from "../google-credentials.js";
 import sharp from "sharp";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -1433,6 +1434,7 @@ test("profile photos are sanitized, resized, published and removable", async (t)
 
 test("new accounts finish onboarding only after a working calendar connection", async (t) => {
   const s = await setup(t);
+  s.config.googleId = "test-client";
   s.db.prepare("UPDATE users SET onboarded=0 WHERE id=?").run(s.user.id);
   assert.equal(
     (await s.agent.get("/api/me")).body.user.onboardingComplete,
@@ -1440,8 +1442,8 @@ test("new accounts finish onboarding only after a working calendar connection", 
   );
   await s.agent.post("/api/me/onboarding").send({}).expect(409);
   s.db
-    .prepare("UPDATE users SET google_refresh=? WHERE id=?")
-    .run("test-calendar-binding", s.user.id);
+    .prepare("UPDATE users SET google_refresh=?,google_client_hash=? WHERE id=?")
+    .run("test-calendar-binding", googleClientFingerprint(s.config.googleId), s.user.id);
   await s.agent.post("/api/me/onboarding").send({}).expect(409);
   await s.agent.get("/api/events").expect(403);
   await s.agent.get("/api/team").expect(403);

@@ -17,6 +17,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DateTime } from "luxon";
 import { z } from "zod";
+import { googleCredentials } from "./google-credentials.js";
 import {
   calendarDiagnostic,
   oauthDiagnostic,
@@ -96,6 +97,7 @@ export function createApp(options = {}) {
     mailFrom: process.env.MAIL_FROM,
     googleId: process.env.GOOGLE_CLIENT_ID,
     googleSecret: process.env.GOOGLE_CLIENT_SECRET,
+    googleLegacyId: process.env.GOOGLE_LEGACY_CLIENT_ID,
     encryptionKey:
       process.env.TOKEN_ENCRYPTION_KEY ||
       (process.env.TOKEN_ENCRYPTION_SECRET
@@ -206,6 +208,8 @@ export function createApp(options = {}) {
     overrides: "TEXT NOT NULL DEFAULT '[]'",
     google_account: "TEXT",
     google_calendar: "TEXT",
+    google_client_hash: "TEXT",
+    google_connection_version: "INTEGER NOT NULL DEFAULT 0",
   });
   migrate("event_types", {
     instructions: "TEXT NOT NULL DEFAULT ''",
@@ -238,6 +242,7 @@ export function createApp(options = {}) {
   const get = (sql, ...params) => db.prepare(sql).get(...params);
   const all = (sql, ...params) => db.prepare(sql).all(...params);
   const run = (sql, ...params) => db.prepare(sql).run(...params);
+  const credentials = googleCredentials(db, config);
   const app = express();
   app.disable("x-powered-by");
   // Configure the exact number of trusted reverse proxies at deployment; never trust arbitrary forwarded headers.
@@ -304,7 +309,9 @@ export function createApp(options = {}) {
     notice: u.notice,
     horizon: u.horizon,
     buffer: u.buffer,
-    googleConnected: !!u.google_refresh,
+    googleConnected: !!credentials.credential(u),
+    googleReconnectRequired:
+      credentials.hasStored(u) && !credentials.credential(u),
     googleEmail: u.google_email,
     photo: u.photo || null,
     onboardingComplete: !!u.onboarded,
@@ -901,7 +908,7 @@ export function createApp(options = {}) {
       "Upload a profile picture before finishing setup.",
     );
     need(
-      req.user.google_refresh,
+      credentials.credential(req.user),
       409,
       "Connect Google Calendar before finishing setup.",
     );
@@ -911,7 +918,9 @@ export function createApp(options = {}) {
     need(
       fresh.active &&
         fresh.photo &&
-        fresh.google_refresh === req.user.google_refresh,
+        fresh.google_refresh === req.user.google_refresh &&
+        fresh.google_connection_version ===
+          req.user.google_connection_version,
       409,
       "Your profile or connection changed. Please finish setup again.",
     );
@@ -1078,7 +1087,7 @@ export function createApp(options = {}) {
         role: u.role,
         active: !!u.active,
         ...(req.user.role === "admin"
-          ? { email: u.email, googleConnected: !!u.google_refresh }
+          ? { email: u.email, googleConnected: !!credentials.credential(u) }
           : {}),
       })),
     }),
@@ -1266,12 +1275,27 @@ export function createApp(options = {}) {
       ].join("\r\n"),
     );
   });
-  async function accessToken(user) {
+  function requireGoogleCredential(user) {
     need(
-      user.google_refresh,
+      credentials.hasStored(user),
       409,
       "This host has not connected Google Calendar yet.",
     );
+    const selected = credentials.credential(user);
+    if (!selected) {
+      const error = new HttpError(503, publicCalendarError);
+      error.calendarDiagnostic = {
+        code: "CLIENT_RECONNECT_REQUIRED",
+        message:
+          "Reconnect Google Calendar for the new BMT Calendar connection. Use the same Google account and calendar. Your existing appointments are preserved.",
+        diagnostics: {},
+      };
+      throw error;
+    }
+    return selected;
+  }
+  async function accessToken(user) {
+    const selected = requireGoogleCredential(user);
     try {
       const data = await request("https://oauth2.googleapis.com/token", {
         method: "POST",
@@ -1279,7 +1303,7 @@ export function createApp(options = {}) {
         body: new URLSearchParams({
           client_id: config.googleId,
           client_secret: config.googleSecret,
-          refresh_token: decrypt(user.google_refresh),
+          refresh_token: decrypt(selected.encryptedRefresh),
           grant_type: "refresh_token",
         }),
       });
@@ -1346,6 +1370,7 @@ export function createApp(options = {}) {
     const u = get("SELECT * FROM users WHERE id=?", b.user_id);
     if (!b.google_id) return u;
     if (config.demo && u.email === "demo@bmtcalendar.local") return u;
+    if (!config.calendarProvider) requireGoogleCredential(u);
     need(
       accountId(u),
       409,
@@ -1397,7 +1422,8 @@ export function createApp(options = {}) {
       need(
         accountId(current) === accountId(u) &&
           calendarId(current) === calendarId(u) &&
-          current.google_refresh === u.google_refresh,
+          current.google_refresh === u.google_refresh &&
+          current.google_connection_version === u.google_connection_version,
         409,
         "The calendar connection changed during verification. Please try again.",
       );
@@ -1507,7 +1533,7 @@ export function createApp(options = {}) {
     return [...local, ...data.calendars[id].busy];
   }
   app.get("/api/google/status", auth, async (req, res) => {
-    if (!req.user.google_refresh)
+    if (!credentials.hasStored(req.user))
       return res.json({
         healthy: false,
         code: "NOT_CONNECTED",
@@ -1602,6 +1628,7 @@ export function createApp(options = {}) {
           "active",
           "onboarded",
           "google_refresh",
+          "google_connection_version",
         ].every((key) => freshUser[key] === u[key]),
       409,
       "The host's scheduling settings changed. Please refresh and choose a time.",
@@ -1957,7 +1984,9 @@ export function createApp(options = {}) {
       !connectionChanges.has(u.id) &&
         currentHost.active &&
         currentHost.onboarded &&
-        currentHost.google_refresh === u.google_refresh,
+        currentHost.google_refresh === u.google_refresh &&
+        currentHost.google_connection_version ===
+          u.google_connection_version,
       409,
       "The host's calendar connection changed. Please try again.",
     );
@@ -2234,6 +2263,8 @@ export function createApp(options = {}) {
       need(
         currentHost.active &&
           currentHost.google_refresh === u.google_refresh &&
+          currentHost.google_connection_version ===
+            u.google_connection_version &&
           !connectionChanges.has(u.id),
         409,
         "The host connection changed. Please try again.",
@@ -2572,7 +2603,18 @@ export function createApp(options = {}) {
       "Google Calendar is not configured yet.",
     );
     const verifier = token(),
-      state = createToken(req.user.id, "oauth", null, verifier, 10);
+      state = createToken(
+        req.user.id,
+        "oauth",
+        null,
+        JSON.stringify({
+          version: 1,
+          verifier,
+          clientHash: credentials.currentClient(),
+          redirectUri: `${config.baseUrl}/api/google/callback`,
+        }),
+        10,
+      );
     const params = new URLSearchParams({
       client_id: config.googleId,
       redirect_uri: `${config.baseUrl}/api/google/callback`,
@@ -2602,6 +2644,21 @@ export function createApp(options = {}) {
       "This calendar connection belongs to another session.",
     );
     run("DELETE FROM tokens WHERE hash=?", state.hash);
+    let binding;
+    try {
+      binding = JSON.parse(state.data);
+    } catch {}
+    const clientHash = credentials.currentClient();
+    need(
+      binding?.version === 1 &&
+        clientHash &&
+        binding.clientHash === clientHash &&
+        typeof binding.verifier === "string" &&
+        /^[a-f0-9]{64}$/.test(binding.verifier) &&
+        binding.redirectUri === `${config.baseUrl}/api/google/callback`,
+      409,
+      "The Google connection configuration changed. Start Connect Google Calendar again.",
+    );
     need(
       typeof req.query.code === "string",
       400,
@@ -2616,7 +2673,7 @@ export function createApp(options = {}) {
         code: req.query.code,
         redirect_uri: `${config.baseUrl}/api/google/callback`,
         grant_type: "authorization_code",
-        code_verifier: state.data,
+        code_verifier: binding.verifier,
       }),
     });
     if (data.scope) {
@@ -2646,6 +2703,12 @@ export function createApp(options = {}) {
     );
     const fresh = get("SELECT * FROM users WHERE id=?", req.user.id);
     need(
+      credentials.currentClient() === clientHash &&
+        binding.redirectUri === `${config.baseUrl}/api/google/callback`,
+      409,
+      "The Google connection configuration changed. Start Connect Google Calendar again.",
+    );
+    need(
       fresh.active &&
         get(
           "SELECT hash FROM sessions WHERE hash=? AND expires>?",
@@ -2663,6 +2726,13 @@ export function createApp(options = {}) {
     const sameAccount = fresh.google_account
       ? fresh.google_account === info.sub
       : fresh.google_email?.toLowerCase() === info.email.toLowerCase();
+    need(
+      !credentials.hasStored(fresh) ||
+        fresh.google_client_hash === clientHash ||
+        sameAccount,
+      409,
+      "Reconnect the same Google account when moving to the new BMT Calendar connection. Your original connection and appointments are preserved.",
+    );
     // Unbound legacy records do not prove which account owns them. Permit a
     // corrective reconnect, but preserve every established appointment binding.
     need(
@@ -2682,21 +2752,13 @@ export function createApp(options = {}) {
         fresh.google_email?.toLowerCase() ||
         info.email.toLowerCase()
       : info.email.toLowerCase();
-    run(
-      "UPDATE users SET google_refresh=?,google_email=?,google_account=?,google_calendar=? WHERE id=?",
+    credentials.save(
+      fresh,
       encrypt(data.refresh_token),
-      info.email,
-      info.sub,
+      info,
       nextCalendar,
-      req.user.id,
+      sameAccount,
     );
-    if (sameAccount && fresh.google_email)
-      run(
-        "UPDATE bookings SET google_account=? WHERE user_id=? AND google_account=?",
-        info.sub,
-        fresh.id,
-        fresh.google_email.toLowerCase(),
-      );
     res.redirect(
       (req.user.onboarded ? "/app/settings" : "/app/setup") +
         "?google=connected",
@@ -2715,16 +2777,22 @@ export function createApp(options = {}) {
     );
     connectionChanges.add(req.user.id);
     try {
-      if (req.user.google_refresh) {
+      const selected = credentials.credential(req.user);
+      need(
+        selected || !credentials.hasStored(req.user),
+        409,
+        "The saved connection belongs to another or unverified OAuth client. Reconnect the current BMT Calendar connection before disconnecting it. Other project grants are preserved.",
+      );
+      if (selected) {
         await request("https://oauth2.googleapis.com/revoke", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
-            token: decrypt(req.user.google_refresh),
+            token: decrypt(selected.encryptedRefresh),
           }),
         });
+        credentials.disconnect(req.user, selected);
       }
-      run("UPDATE users SET google_refresh=NULL WHERE id=?", req.user.id);
       res.json({ ok: true });
     } finally {
       connectionChanges.delete(req.user.id);
