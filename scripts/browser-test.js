@@ -1,5 +1,6 @@
 import { chromium } from "@playwright/test";
 import { createApp } from "../server.js";
+import { googleClientFingerprint } from "../google-credentials.js";
 import assert from "node:assert/strict";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { DateTime, Settings } from "luxon";
@@ -137,9 +138,17 @@ try {
     .prepare("SELECT id FROM users WHERE email=?")
     .get("owner@example.com");
   // The OAuth handshake is exercised in API tests; simulate its saved connection here.
+  service.config.googleId = "browser-client";
   service.db
-    .prepare("UPDATE users SET google_refresh=?,google_email=? WHERE id=?")
-    .run("browser-test-connection", "owner@example.com", pendingOwner.id);
+    .prepare(
+      "UPDATE users SET google_refresh=?,google_email=?,google_client_hash=? WHERE id=?",
+    )
+    .run(
+      "browser-test-connection",
+      "owner@example.com",
+      googleClientFingerprint(service.config.googleId),
+      pendingOwner.id,
+    );
   service.config.calendarProvider = {
     busy: async () => [],
     create: async () => ({}),
@@ -287,6 +296,68 @@ try {
   completed++;
   console.log(
     "PASS browser: private Google diagnostics, verified project link, missing metadata and recovery",
+  );
+  service.config.googleId = "new-browser-client";
+  await page.reload();
+  await page
+    .getByRole("link", { name: "Reconnect Google Calendar", exact: true })
+    .waitFor();
+  await page
+    .getByText(
+      "Reconnect Google Calendar for the new BMT Calendar connection. Use the same Google account and calendar. Your existing appointments are preserved.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(
+    await page.getByText("Connected", { exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Disconnect", exact: true })
+      .count(),
+    0,
+  );
+  assert.equal(
+    (await page.request.get("http://localhost:3199/api/bookings")).status(),
+    200,
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page
+    .getByRole("link", { name: "Reconnect Google Calendar", exact: true })
+    .scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: "test-results/google-client-reconnect-mobile.png",
+    animations: "disabled",
+  });
+  service.db
+    .prepare("UPDATE users SET onboarded=0 WHERE id=?")
+    .run(pendingOwner.id);
+  await page.reload();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Continue to workspace" })
+      .isEnabled(),
+    false,
+  );
+  assert.equal(
+    (
+      await page.request.post("http://localhost:3199/api/me/onboarding", {
+        data: {},
+      })
+    ).status(),
+    409,
+  );
+  service.config.googleId = "browser-client";
+  service.db
+    .prepare("UPDATE users SET onboarded=1 WHERE id=?")
+    .run(pendingOwner.id);
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto("http://localhost:3199/app/settings");
+  await page.getByText("Connected", { exact: true }).waitFor();
+  completed++;
+  console.log(
+    "PASS browser: client migration requires reconnect, preserves workspace access and blocks incomplete onboarding",
   );
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   completed++;

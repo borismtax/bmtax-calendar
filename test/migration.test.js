@@ -247,7 +247,7 @@ function seedLegacy(path, profiles) {
   return db;
 }
 
-for (const baseline of ["61741fc", "c978424", "49cf519"])
+for (const baseline of ["61741fc", "c978424", "49cf519", "4b95812"])
   test(`online backup, restore and additive migration preserve ${baseline} accounts and appointments`, async (t) => {
     const profiles = baseline !== "61741fc";
     const directory = mkdtempSync(join(tmpdir(), "bmt-backup-rehearsal-"));
@@ -275,7 +275,7 @@ for (const baseline of ["61741fc", "c978424", "49cf519"])
     });
     try {
       source = seedLegacy(paths.source, profiles);
-      if (baseline === "49cf519") {
+      if (["49cf519", "4b95812"].includes(baseline)) {
         // Frozen deployed schema, independent of the current migration implementation.
         source.exec(`ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
           ALTER TABLE users ADD COLUMN overrides TEXT NOT NULL DEFAULT '[]';
@@ -291,6 +291,17 @@ for (const baseline of ["61741fc", "c978424", "49cf519"])
           ALTER TABLE bookings ADD COLUMN meet_retry_at INTEGER NOT NULL DEFAULT 0;
           ALTER TABLE bookings ADD COLUMN meet_attempts INTEGER NOT NULL DEFAULT 0;
           UPDATE bookings SET meet_state='pending' WHERE status='scheduled' AND location='Google Meet' AND meet_url IS NULL AND google_id IS NOT NULL;`);
+      }
+      if (baseline === "4b95812") {
+        source.exec(`ALTER TABLE event_types ADD COLUMN windows TEXT;
+          ALTER TABLE event_types ADD COLUMN buffer_before INTEGER;
+          ALTER TABLE event_types ADD COLUMN buffer_after INTEGER;
+          ALTER TABLE event_types ADD COLUMN slot_interval INTEGER NOT NULL DEFAULT 15;
+          ALTER TABLE event_types ADD COLUMN slot_alignment TEXT NOT NULL DEFAULT 'window';
+          ALTER TABLE event_types ADD COLUMN daily_limit INTEGER;
+          ALTER TABLE bookings ADD COLUMN buffer_before INTEGER;
+          ALTER TABLE bookings ADD COLUMN buffer_after INTEGER;
+          CREATE INDEX booking_daily_limit ON bookings(user_id,event_id,status,start);`);
       }
       const original = snapshot(source),
         originalSchema = schema(source);
@@ -356,6 +367,12 @@ for (const baseline of ["61741fc", "c978424", "49cf519"])
         assert.equal(user.active, 1);
         assert.equal(user.google_account, null);
         assert.equal(user.google_calendar, null);
+        assert.equal(
+          user.google_client_hash,
+          null,
+          "Migration does not guess legacy token issuers",
+        );
+        assert.equal(user.google_connection_version, 0);
         assert.equal(user.overrides, "[]");
         assert.equal(
           user.onboarded,
