@@ -185,6 +185,109 @@ try {
   await page
     .getByText("Google Calendar availability is working.", { exact: true })
     .waitFor();
+  let diagnosticReply = {
+    healthy: false,
+    code: "API_DISABLED",
+    message:
+      "Google reports that Calendar API is disabled for the requesting project.",
+    diagnostics: {
+      reason: "SERVICE_DISABLED",
+      domain: "googleapis.com",
+      service: "calendar-json.googleapis.com",
+      consumer: "projects/123456789",
+    },
+    enablementUrl:
+      "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com?project=123456789",
+  };
+  await page.route("**/api/google/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(diagnosticReply),
+    }),
+  );
+  await page
+    .getByRole("button", { name: "Check connection", exact: true })
+    .click();
+  await page.getByText("projects/123456789", { exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("link", {
+        name: "Open Calendar API for the reported project",
+        exact: true,
+      })
+      .getAttribute("href"),
+    diagnosticReply.enablementUrl,
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#calendar-health").scrollIntoViewIfNeeded();
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+    true,
+  );
+  assert.ok(
+    (await page.locator("#calendar-health").boundingBox()).width >= 280,
+    "Connection diagnostics have a readable full-width mobile panel",
+  );
+  await page.screenshot({
+    path: "test-results/google-diagnostics-mobile.png",
+    animations: "disabled",
+  });
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  diagnosticReply = {
+    healthy: false,
+    code: "API_DISABLED",
+    message: "Google reports a disabled service.",
+    diagnostics: { reason: "accessNotConfigured", domain: "usageLimits" },
+  };
+  await page
+    .getByRole("button", { name: "Check connection", exact: true })
+    .click();
+  await page
+    .getByText(
+      "Google did not identify a verified Calendar project in this response.",
+      { exact: false },
+    )
+    .waitFor();
+  assert.equal(
+    await page.locator("#calendar-health a").count(),
+    0,
+    "No default-project link without a verified service/project",
+  );
+  diagnosticReply = {
+    healthy: false,
+    code: "PROJECT_RESTRICTED",
+    message: "The project has an access restriction.",
+    diagnostics: {
+      reason: "CONSUMER_SUSPENDED",
+      domain: "googleapis.com",
+      consumer: "projects/123456789",
+    },
+  };
+  await page
+    .getByRole("button", { name: "Check connection", exact: true })
+    .click();
+  await page.getByText("CONSUMER_SUSPENDED", { exact: true }).waitFor();
+  assert.equal(await page.locator("#calendar-health a").count(), 0);
+  diagnosticReply = {
+    healthy: true,
+    message: "Google Calendar availability is working.",
+  };
+  await page
+    .getByRole("button", { name: "Check connection", exact: true })
+    .click();
+  await page
+    .getByText("Google Calendar availability is working.", { exact: true })
+    .waitFor();
+  assert.equal(await page.locator("#calendar-health dl").count(), 0);
+  assert.equal(await page.locator("#calendar-health a").count(), 0);
+  await page.unroute("**/api/google/status");
+  completed++;
+  console.log(
+    "PASS browser: private Google diagnostics, verified project link, missing metadata and recovery",
+  );
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   completed++;
   console.log(

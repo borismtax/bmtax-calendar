@@ -1916,6 +1916,13 @@ p {
   .side-stack {
     gap: 12px;
   }
+  .settings-grid .side-stack {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-grid .connection > div {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
   .mini-calendar {
     padding: 15px;
   }
@@ -2316,4 +2323,15 @@ p {
 }
 .event-scheduling .hours-range input {
   min-width: 0;
+}
+.calendar-diagnostics {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.calendar-diagnostics dt {
+  font-weight: 600;
+  margin-top: 8px;
+}
+.calendar-diagnostics dd {
+  margin-left: 0;
 }

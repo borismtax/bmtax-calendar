@@ -1207,8 +1207,15 @@ const actions = {
         '<p class="small muted">Checking Google Calendar…</p>';
     try {
       const result = await api("/api/google/status");
-      if (output?.isConnected)
-        output.innerHTML = `<div class="${result.healthy ? "form-success" : "form-error"}">${e(result.message)}${result.code === "API_DISABLED" ? '<p><a href="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com" target="_blank" rel="noopener">Open Google Calendar API in Google Cloud</a></p>' : ""}</div>`;
+      if (output?.isConnected) {
+        const fields = [
+          ["reason", "Google reason"],
+          ["domain", "Error domain"],
+          ["service", "Google service"],
+          ["consumer", "Reported project"],
+        ].filter(([key]) => result.diagnostics?.[key]);
+        output.innerHTML = `<div class="${result.healthy ? "form-success" : "form-error"}">${e(result.message)}${fields.length ? `<dl class="calendar-diagnostics">${fields.map(([key, label]) => `<dt>${label}</dt><dd>${e(result.diagnostics[key])}</dd>`).join("")}</dl>` : ""}${result.enablementUrl ? `<p><a href="${e(result.enablementUrl)}" target="_blank" rel="noopener">Open Calendar API for the reported project</a></p>` : result.code === "API_DISABLED" ? "<p>Google did not identify a verified Calendar project in this response. Compare the deployed OAuth client with Google Cloud before enabling an API.</p>" : ""}</div>`;
+      }
     } finally {
       if (button.isConnected) button.disabled = false;
     }
